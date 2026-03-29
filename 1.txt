@@ -1,1 +1,166 @@
+# Building a metal panel layout PWA for field installers
+
+**No existing tool handles the core problem well.** After researching dozens of commercial products, open-source projects, mobile apps, and manufacturer calculators, not a single tool specifically solves balanced panel centering for R-panel/PBR exposed fastener systems with visual layout output and cut lists — the exact workflow this PWA targets. SmartBuild Systems comes closest (generating panel layouts from 3D models   at $200/month), but it’s a full building design platform, not a field-ready panel layout tool. This gap represents a genuine opportunity. The optimal technical stack for building this PWA is **SvelteKit or React + Konva.js + Dexie.js + jsPDF**, deployed with Workbox service workers for offline-first operation. Below is a detailed breakdown of every research area.
+
+-----
+
+## The competitive landscape has a clear gap
+
+The existing market splits into four tiers, none of which solve the panel-balancing problem.
+
+**Enterprise design software** like SmartBuild Systems (web-based,  $200/month), MBS Software (desktop, enterprise pricing), and Strucsoft MWF (Revit plugin) targets metal building manufacturers doing $1.5M–$360M+ annually. These tools generate material takeoffs from full 3D building models but focus on structural design rather than per-wall panel aesthetics. SmartBuild generates panel layout drawings and cut lists but doesn’t confirm centering logic. MBS produces shop drawings but is overkill for a field installer. Strucsoft handles cold-formed steel framing,  not exterior cladding layout.
+
+**Manufacturer calculators** from companies like True Metal Supply, VCalc, and Mueller Inc. perform simple arithmetic — divide wall width by **36” coverage width**, output a panel count.  None handle centering, openings, or generate visual layouts. MBCI   and Metal Sales (both under Cornerstone Building Brands) provide installation guides and CAD details but no self-service layout calculators.  
+
+**Mobile apps** like HOVER, iRoofing, and various roofing calculators focus on measurement capture, cost estimation, or rafter calculations. HOVER generates impressive 3D models from photos but produces material lists,  not panel-level layouts. No app found generates balanced panel placement diagrams or cut lists for exposed fastener panels.
+
+**Open-source tools** solve adjacent problems. Projects like opcut (Python, cutting stock optimization),  Deepnest (CNC nesting),  and genetic-cutting (JavaScript, 1D/2D optimization using genetic algorithms)  provide algorithmic building blocks for waste minimization, but none understand metal panel domains — overlaps, rib patterns, centering, or trim. The genetic-cutting library on GitHub is particularly interesting as a starting point for cut optimization since it’s JavaScript-native and handles 1D problems directly.
+
+**The key takeaway**: every existing tool either calculates total panel count without centering logic or requires a full 3D building model. A focused, field-ready PWA that inputs wall/roof dimensions, computes balanced panel placement with equal edge panels, visualizes the layout, and outputs a cut list — all offline — would be the first of its kind.
+
+-----
+
+## Recommended technical stack and why each piece matters
+
+The framework choice comes down to two strong options, each with a clear trade-off. **SvelteKit** produces the smallest bundles  (**~1.6 KB runtime** versus React’s ~42 KB),  which matters enormously on construction sites with spotty 3G connectivity. It has official Konva bindings (svelte-konva), built-in service worker support, and reactive stores that eliminate the need for external state management. **React + Vite** offers the largest ecosystem,  the most mature canvas library integration (react-konva is battle-tested), and the widest hiring pool. Both work well with vite-plugin-pwa for service worker generation.
+
+For a solo developer or small team prioritizing field performance, SvelteKit is the stronger choice. For a team that may grow or needs maximum library compatibility, React wins.
+
+**Konva.js is the clear rendering choice** for drawing panel layouts. Its multi-layer canvas architecture maps directly to the problem domain: Layer 1 renders the static wall/roof outline and dimension lines, Layer 2 renders interactive panel rectangles, and Layer 3 handles overlays like tooltips and selection indicators. Konva handles hundreds of rectangles at 60fps with dirty-region detection,  includes built-in pinch-to-zoom and stage dragging for tablets, supports touch events natively, and exports to PNG/JPEG via `stage.toDataURL()`. Its **~150 KB bundle** is reasonable, and it’s written in TypeScript.
+
+Fabric.js was the runner-up, offering SVG import/export that Konva lacks — useful if vector-quality PDF export is critical.  However, Fabric’s flat object model (no layer system) means the entire canvas redraws on every change, dropping to ~9 FPS with many objects versus Konva’s ~23 FPS in benchmarks.  Fabric also lacks built-in zoom/pan, requiring manual implementation.
+
+PixiJS (WebGL-based, 60 FPS with 8K objects) is overkill for semi-static panel diagrams and has weaker text rendering.  D3.js is fundamentally a data visualization tool, wrong for interactive drawing. Native SVG works for simpler layouts but degrades with hundreds of DOM elements  during zoom/pan operations — the mapping company Felt specifically migrated away from SVG+React to Canvas for this reason. 
+
+For **offline data storage**, Dexie.js wraps IndexedDB with a fluent, Promise-based API,  schema versioning for evolving data models, indexed queries, and TypeScript support  — all in **~30 KB**. A natural data model:
+
+- **Projects** table: id, name, timestamps
+- **Elevations** table: id, projectId, type (wall/roof), dimensions
+- **Panels** table: id, elevationId, position, width, length, cut type
+
+For **PDF generation**, a combined approach works best: **jsPDF** (~150 KB) for rendering visual panel layout diagrams programmatically  with precise rectangle/line/text positioning using inch coordinates, and **pdfmake** for generating structured cut list tables and material reports via declarative JSON definitions.  Both run entirely client-side. 
+
+The complete stack with SvelteKit + Konva + Dexie + jsPDF estimates to **~350–400 KB gzipped** total — loadable even on slow connections and fully cached for subsequent offline use.
+
+-----
+
+## The centering algorithm and panel geometry are well-defined
+
+The core panel balancing algorithm used by professional installers follows a straightforward formula. R-Panel/PBR panels have a universal **36” coverage width**  (overall width ~37.5”–38” including the overlap portion), with **four trapezoidal ribs at 12” on center** and a **1.25” rib height**.   PBR panels add a purlin-bearing leg for stronger roof connections   at only 2–3% more cost. 
+
+**The centering calculation** works as follows: divide the wall width by 36” to get the number of full panels, calculate the remainder, then divide by 2 for equal partial panels on each edge. If the full panel count is even, align a panel seam with the wall’s centerline; if odd, align a panel center with the centerline. The critical constraint is that **partial panels should be at least 6”–9” wide** — if the calculated partial is too narrow, remove one full panel and redistribute, yielding wider edge panels.
+
+```
+wallWidth = 292"  (example: 24'-4")
+fullPanels = floor(292 / 36) = 8
+remainder = 292 - (8 × 36) = 4"
+partialWidth = 4 / 2 = 2"  → too narrow!
+// Adjust: use 7 full panels instead
+remainder = 292 - (7 × 36) = 40"
+partialWidth = 40 / 2 = 20"  ✓
+```
+
+**Openings (windows, doors)** are handled by running full-height panels with rectangular cutouts at opening locations, rather than breaking panels into separate segments above and below. This maintains structural continuity and reduces leak points. The algorithm must map each opening to the panels it intersects, computing L-shaped or U-shaped cuts. J-channel trim surrounds all four sides of each opening  — jambs first, sill second, head last — with silicone sealant for waterproofing. 
+
+**Roof layouts differ fundamentally from walls.** Panels run eave-to-ridge (perpendicular to the eave line), and centering is less critical because rake trim covers the edges. Panel length equals the slope distance plus overhang allowances:  `slopeLength = horizontalRun × √(1 + (pitch/12)²)`, plus 1”–2” eave overhang and ~1” ridge allowance. Panels are custom cut-to-length  from coil stock,  with maximum recommended lengths of **40’–45’** depending on manufacturer. 
+
+**Hip and valley cuts** follow predictable geometry: for a standard 90° hip with equal pitches, each successive panel is approximately **36” shorter** than the previous one (adjusted for pitch). The critical waste-reduction technique is **block-cutting** — the offcut from one hip panel can be flipped and used on the opposite hip, reducing hip roof waste from 10–15% to under 5%.  This optimization alone could be a marquee feature of the app.
+
+Industry waste percentages range from **5% for simple gable roofs** to **15–20% for complex hip/valley configurations**.  Custom cut-to-length ordering (standard for R-Panel) eliminates most end waste. For scenarios using pre-cut stock lengths (8’, 10’, 12’), the 1D cutting stock problem applies  — a First-Fit Decreasing heuristic  achieves 90%+ utilization and is simple to implement,  while the Gilmore-Gomory column generation method provides mathematically optimal solutions for larger projects. 
+
+-----
+
+## Offline-first architecture requires careful iOS planning
+
+The PWA must treat offline as the default state, not an edge case. The **app shell architecture** pre-caches the minimal HTML/CSS/JS skeleton during service worker installation, loading instantly on subsequent visits even without connectivity.  Since this is primarily a local calculation tool, nearly the entire application qualifies as the app shell.
+
+**Workbox** (used by 54% of mobile sites) handles service worker complexity through its module system.  The recommended caching strategy is **Cache-First** for all static assets (app code, fonts, icons) and **Stale-While-Revalidate** for any reference data. Key Workbox modules: `workbox-precaching` with revision hashes for automatic cache invalidation, `workbox-routing` for URL pattern matching, and `workbox-expiration` to manage cache size. Build integration via `vite-plugin-pwa` auto-generates precache manifests from the Vite build output.
+
+**iOS presents the most significant platform challenges.** Safari still does not support Web Bluetooth, Background Sync, or automatic install prompts  (as of early 2026). All browsers on iOS must use WebKit — despite EU DMA fines of €500M in April 2025, no alternative browser engines have shipped on iOS. Storage quotas are tighter: Safari in-browser limits Cache API to ~50 MB on mobile, though installed PWAs (added to home screen) get up to 20–60% of disk on Safari 17+. The **7-day eviction policy** purges all script-writable storage if the user doesn’t interact with the site for a week — but installed PWAs are exempt. The strategy: aggressively encourage “Add to Home Screen” installation (with step-by-step visual instructions, since iOS requires 4+ taps through the Share menu), re-cache critical assets on every app launch, and store all project data in IndexedDB via Dexie.js.
+
+**App updates in the field** should never force-reload. Use Workbox’s `skipWaiting()` + `clientsClaim()` to prepare new service workers, then display a non-intrusive “New version available — tap to update” banner. Persist the prompt until the user acts — a field worker mid-entry cannot afford an unexpected reload.
+
+Storage capacity on **Chrome/Android is generous** — up to 80% of disk space per origin, meaning several gigabytes on most devices. IndexedDB has effectively unlimited capacity compared to localStorage’s 5–10 MB limit.  
+
+-----
+
+## Field-ready UI demands oversized targets and smart input design
+
+Standard touch targets (Apple’s 44pt, Google’s 48dp) are insufficient for gloved hands. MIT Touch Lab research shows average bare finger width at **45–57px**, and work gloves significantly increase contact area while reducing precision. **Target 56–72px minimum** for primary action buttons with **12–16px spacing** between elements. Even capacitive-compatible work gloves (Mechanix, MCR Safety) reduce accuracy enough to warrant this oversizing.
+
+**For outdoor visibility**, use WCAG AAA contrast ratios (7:1 minimum) with dark text on light backgrounds — counterintuitively, dark mode is harder to read in bright sunlight. Minimum **16px base font size**, **18–20px for data entry fields**, and **24px+ for measurement displays**. Use filled icons rather than outlines, and encode meaning with color plus pattern (field workers may wear tinted safety glasses).
+
+**Imperial measurement entry is the make-or-break UX challenge.** Native browser `<input type="number">` fails entirely for feet-inches-fractions format and behaves inconsistently across browsers. The proven approach (validated by apps like “Feet and Inches Calculator” with 384K+ users)  is a **custom numeric keypad with segmented zones**: separate fields for feet, inches, and fractions, with dedicated fraction buttons (1/16 through 15/16 in the user’s configured precision).  Key features that matter:
+
+- Auto-advance from feet → inches → fractions
+- “Copy last” button for repeated similar dimensions
+- Recent values list (last 5–10 entries) for quick re-selection
+- Shorthand parsing: typing `10-6-3/8` interprets as 10’ 6-3/8”
+- All internal math in decimal inches; display conversion to feet-inches-fractions
+
+**For the layout diagram**, standard pinch-to-zoom and two-finger pan gestures handle navigation, with `touch-action: none` on the Konva canvas area to prevent browser zoom conflicts. Add a prominent zoom-reset button and double-tap-to-zoom for quick navigation.
+
+-----
+
+## Input methods beyond manual entry have real limitations
+
+**Manual dimension entry with a custom keypad remains the most reliable primary input method.** Every alternative has significant constraints when targeting a PWA.
+
+**Bluetooth laser measurers** (Bosch BLAZE GLM 50 CX at ~$110,  Leica DISTO D2 at ~$165)  connect via BLE and could auto-populate dimension fields — but Web Bluetooth works only on **Chrome for Android, macOS, and Windows**. iOS Safari explicitly blocks it.  For Android users, this integration is straightforward: request a BLE device filtered by manufacturer name prefix, connect to the GATT service, and subscribe to measurement notifications. For iOS users, a manual entry fallback is required.
+
+**Photo-based measurement** via LiDAR (HOVER, Canvas/Twindo) achieves 1–2% accuracy — adequate for estimation but insufficient for fabrication-level cut lists. These tools are native apps, not web-integrable. The practical integration path: export measurements from a LiDAR app as CSV/JSON, then import into the PWA. WebXR enables AR measurement in PWAs on Chrome/Android but is not supported on iOS Safari.
+
+**DXF file import** is viable and valuable. The `dxf-parser` npm library parses AutoCAD DXF files into structured JavaScript objects in the browser,  including DIMENSION entities that contain measurement values. A higher-level `dxf` library can convert parsed output directly to SVG.  DWG files (Autodesk’s proprietary binary format) have no reliable client-side parser — server-side conversion via Open Design Alliance libraries would be needed.
+
+**PDF dimension extraction** works for vector PDFs with text layers using Mozilla’s PDF.js library to extract embedded text directly. For scanned/raster PDFs, Tesseract.js (WebAssembly OCR, ~2.1 MB) can read dimension text from clean architectural drawings, though accuracy on hand-sketched or low-resolution scans is unreliable. Treat OCR as a stretch goal, not a primary feature.
+
+The recommended progression: launch with manual entry and a custom imperial keypad, add DXF import as the first enhancement, then explore Bluetooth integration for Android users and PDF/OCR as later features.
+
+-----
+
+## Conclusion
+
+This PWA sits in a genuine market gap — professional enough to solve a real workflow problem, yet light enough to work offline on a tablet at a job site. The technical path is clear: **SvelteKit or React for the framework, Konva.js for rendering panel layouts on a multi-layer canvas, Dexie.js for IndexedDB storage, jsPDF for client-side PDF generation, and Workbox for bulletproof offline caching.** The centering algorithm is mathematically simple but operationally valuable — no existing tool implements it in a field-accessible format.
+
+Three features would differentiate this app immediately: **balanced panel centering with visual layout output**, **hip/valley block-cut optimization** that shows installers exactly which offcuts to reuse on opposite hips (potentially cutting waste from 15% to under 5%),  and a **custom imperial fraction keypad** designed for gloved hands on bright job sites. Start with wall elevations (simpler geometry, highest aesthetic impact from centering), then extend to roof planes with slope-adjusted lengths and angle cuts. The estimated bundle size of 350–400 KB gzipped means the entire app loads on a single page view, caches permanently, and never needs the network again.
+
+╔══════════════════════════════════════════╗
+║  PANEL CUT LIST — New Project  
+║  Generated: 3/29/2026              
+╚══════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  End Wall 1
+  42' 0" (504") W × 10' 6" (126") Eave H
+  Panel Cut Height: 9' 10" (118") (8" below eave)
+  Profile: PBR / R-Panel 36" (3' 0" coverage)
+  Layout: Centered · 14 full + no cuts
+  Gable End · Ridge: 18' 6" (222")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  #   WIDTH              LENGTH             NOTES
+  ─── ────────────────── ────────────────── ──────────────────
+  1   FULL               10' 11" 11/16 (131" 11/16) 20.85° left | L:9' 10" R:10' 11" 11/16
+  2   FULL               12' 1" 7/16 (145" 7/16) 20.85° left | L:10' 11" 11/16 R:12' 1" 7/16
+  3   FULL               13' 3" 1/8 (159" 1/8) 20.85° left | L:12' 1" 7/16 R:13' 3" 1/8
+  4   FULL               14' 4" 7/8 (172" 7/8) 20.85° left | L:13' 3" 1/8 R:14' 4" 7/8
+  5   FULL               15' 6" 9/16 (186" 9/16) 20.85° left | L:14' 4" 7/8 R:15' 6" 9/16
+  6   FULL               16' 8" 5/16 (200" 5/16) 20.85° left | L:15' 6" 9/16 R:16' 8" 5/16
+  7   FULL               17' 10" (214")     20.85° left | L:16' 8" 5/16 R:17' 10"
+  8   FULL               17' 10" (214")     20.85° right | L:17' 10" R:16' 8" 5/16
+  9   FULL               16' 8" 5/16 (200" 5/16) 20.85° right | L:16' 8" 5/16 R:15' 6" 9/16
+  10  FULL               15' 6" 9/16 (186" 9/16) 20.85° right | L:15' 6" 9/16 R:14' 4" 7/8
+  11  FULL               14' 4" 7/8 (172" 7/8) 20.85° right | L:14' 4" 7/8 R:13' 3" 1/8
+  12  FULL               13' 3" 1/8 (159" 1/8) 20.85° right | L:13' 3" 1/8 R:12' 1" 7/16
+  13  FULL               12' 1" 7/16 (145" 7/16) 20.85° right | L:12' 1" 7/16 R:10' 11" 11/16
+  14  FULL               10' 11" 11/16 (131" 11/16) 20.85° right | L:10' 11" 11/16 R:9' 10"
+
+  Panels: 14 · Sheets: 14 · Waste: 0" (0.0%)
+
+══════════════════════════════════════════
+  PROJECT SUMMARY
+  Total panels across all walls: 14
+  Total sheets to order: 14
+══════════════════════════════════════════
+
 
