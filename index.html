@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#5B8AF0">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PanelLayout">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <title>Metal Panel Layout Tool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0F1117; overflow-x: hidden; -webkit-tap-highlight-color: transparent; }
+    input, select, button { font-family: inherit; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1A1D27; }
+    ::-webkit-scrollbar-thumb { background: #2E3345; border-radius: 3px; }
+  </style>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// ─── UTILITY: Imperial Measurement System ───────────────────────────────────
+const FRACTIONS = [0, 1/8, 1/4, 3/8, 1/2, 5/8, 3/4, 7/8];
+const FRAC_LABELS = ["", "1/8", "1/4", "3/8", "1/2", "5/8", "3/4", "7/8"];
+
+function decToImperial(decimalInches) {
+  if (decimalInches == null || isNaN(decimalInches)) return { ft: 0, inch: 0, fracIdx: 0, display: '0"', displayWithTotal: '0" (0")' };
+  const neg = decimalInches < 0;
+  const abs = Math.abs(decimalInches);
+  const ft = Math.floor(abs / 12);
+  const remainInches = abs - ft * 12;
+  const wholeInch = Math.floor(remainInches);
+  const fracPart = remainInches - wholeInch;
+  let bestIdx = 0, bestDiff = 999;
+  for (let i = 0; i < FRACTIONS.length; i++) {
+    const d = Math.abs(fracPart - FRACTIONS[i]);
+    if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+  }
+  let finalInch = wholeInch, finalFrac = bestIdx, finalFt = ft;
+  if (bestIdx === 0 && fracPart > 7/8 + 1/16) { finalInch++; finalFrac = 0; }
+  if (finalInch >= 12) { finalFt++; finalInch -= 12; }
+  const sign = neg ? "-" : "";
+  let display = sign;
+  if (finalFt > 0) display += `${finalFt}' `;
+  display += `${finalInch}"`;
+  if (finalFrac > 0) display += ` ${FRAC_LABELS[finalFrac]}`;
+  const totalInches = Math.round(abs * 8) / 8;
+  const totalWhole = Math.floor(totalInches);
+  const totalFracPart = totalInches - totalWhole;
+  let totalFracIdx = 0; let tbd = 999;
+  for (let i = 0; i < FRACTIONS.length; i++) { const d = Math.abs(totalFracPart - FRACTIONS[i]); if (d < tbd) { tbd = d; totalFracIdx = i; } }
+  let totalDisplay = `${totalWhole}"`;
+  if (totalFracIdx > 0) totalDisplay += ` ${FRAC_LABELS[totalFracIdx]}`;
+  return { ft: finalFt, inch: finalInch, fracIdx: finalFrac, display: display.trim(), displayWithTotal: `${display.trim()} (${sign}${totalDisplay})` };
+}
+
+function parseImperialInput(str) {
+  if (!str || str.trim() === "") return null;
+  str = str.trim().replace(/\s+/g, " ");
+  // Try decimal number first
+  if (/^\d+(\.\d+)?$/.test(str)) return parseFloat(str);
+  // Try feet-inches-fraction: 10-6-1/4 or 10'6"1/4 or 10' 6" 1/4
+  let m = str.match(/^(\d+)['\-\s]+(\d+)(?:["\-\s]+(\d+\/\d+))?["\s]*$/);
+  if (m) {
+    let val = parseInt(m[1]) * 12 + parseInt(m[2]);
+    if (m[3]) { const [n, d] = m[3].split("/").map(Number); val += n / d; }
+    return val;
+  }
+  // Try just inches with fraction: 6 1/4 or 6-1/4
+  m = str.match(/^(\d+)[\-\s]+(\d+\/\d+)["\s]*$/);
+  if (m) { const [n, d] = m[2].split("/").map(Number); return parseInt(m[1]) + n / d; }
+  // Try just fraction
+  m = str.match(/^(\d+)\/(\d+)$/);
+  if (m) return parseInt(m[1]) / parseInt(m[2]);
+  // Try feet only: 10'
+  m = str.match(/^(\d+)'$/);
+  if (m) return parseInt(m[1]) * 12;
+  // Try inches only: 6"
+  m = str.match(/^(\d+)"$/);
+  if (m) return parseInt(m[1]);
+  return null;
+}
+
+// ─── MATH ENGINE: Panel Layout Calculations ─────────────────────────────────
+function generateLayoutVariations(wallWidth, panelCoverage, minPartialWidth = 6) {
+  const variations = [];
+  // Method 1: Centered — equal partials both sides
+  const fullCount = Math.floor(wallWidth / panelCoverage);
+  for (let fc = fullCount; fc >= Math.max(fullCount - 2, 1); fc--) {
+    const remainder = wallWidth - fc * panelCoverage;
+    const partial = remainder / 2;
+    if (partial >= minPartialWidth || remainder === 0) {
+      const panels = [];
+      if (remainder > 0) panels.push({ width: partial, position: "left-partial", index: 1 });
+      for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: panels.length + 1 });
+      if (remainder > 0) panels.push({ width: partial, position: "right-partial", index: panels.length + 1 });
+      const waste = remainder > 0 ? (panelCoverage - partial) * 2 : 0;
+      variations.push({
+        id: `centered-${fc}`,
+        name: `Centered · ${fc} full + ${remainder > 0 ? "2 partials" : "no cuts"}`,
+        description: remainder > 0 ? `Equal ${decToImperial(partial).display} partials on each side` : "Perfect fit — no partial panels needed",
+        method: "centered",
+        panels,
+        fullPanels: fc,
+        partialWidth: partial,
+        totalPanels: panels.length,
+        sheetsNeeded: panels.length,
+        wasteInches: waste,
+        wastePercent: panels.length > 0 ? (waste / (panels.length * panelCoverage)) * 100 : 0,
+      });
+    }
+  }
+  // Method 2: Left-flush — full panels from left, one cut on right
+  for (let fc = fullCount; fc >= Math.max(fullCount - 1, 1); fc--) {
+    const remainder = wallWidth - fc * panelCoverage;
+    if (remainder > 0 && remainder >= minPartialWidth) {
+      const panels = [];
+      for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: panels.length + 1 });
+      panels.push({ width: remainder, position: "right-partial", index: panels.length + 1 });
+      variations.push({
+        id: `left-flush-${fc}`,
+        name: `Left flush · ${fc} full + 1 cut right`,
+        description: `Full panels from left, ${decToImperial(remainder).display} cut panel on right`,
+        method: "left-flush",
+        panels,
+        fullPanels: fc,
+        partialWidth: remainder,
+        totalPanels: panels.length,
+        sheetsNeeded: panels.length,
+        wasteInches: panelCoverage - remainder,
+        wastePercent: ((panelCoverage - remainder) / (panels.length * panelCoverage)) * 100,
+      });
+    }
+  }
+  // Method 3: Right-flush
+  for (let fc = fullCount; fc >= Math.max(fullCount - 1, 1); fc--) {
+    const remainder = wallWidth - fc * panelCoverage;
+    if (remainder > 0 && remainder >= minPartialWidth) {
+      const panels = [];
+      panels.push({ width: remainder, position: "left-partial", index: 1 });
+      for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: panels.length + 1 });
+      variations.push({
+        id: `right-flush-${fc}`,
+        name: `Right flush · 1 cut left + ${fc} full`,
+        description: `${decToImperial(remainder).display} cut panel on left, full panels to right`,
+        method: "right-flush",
+        panels,
+        fullPanels: fc,
+        partialWidth: remainder,
+        totalPanels: panels.length,
+        sheetsNeeded: panels.length,
+        wasteInches: panelCoverage - remainder,
+        wastePercent: ((panelCoverage - remainder) / (panels.length * panelCoverage)) * 100,
+      });
+    }
+  }
+  // Sort: centered first, then by least waste
+  variations.sort((a, b) => {
+    if (a.method === "centered" && b.method !== "centered") return -1;
+    if (b.method === "centered" && a.method !== "centered") return 1;
+    return a.wasteInches - b.wasteInches;
+  });
+  return variations.slice(0, 5);
+}
+
+// ─── ASYMMETRIC GABLE END WALL ENGINE ───────────────────────────────────────
+//
+// Geometry:
+//   Left eave height  (leftEaveH)  — structural eave on the left side
+//   Right eave height (rightEaveH) — structural eave on the right side
+//   Ridge height      (ridgeH)     — peak of the gable
+//   Ridge X offset    (ridgeX)     — horizontal distance from left wall edge to ridge
+//   Left panel cut height  (leftPCH)  — actual panel termination on left side
+//   Right panel cut height (rightPCH) — actual panel termination on right side
+//
+// The roof forms two independent slopes:
+//   Left slope:  from (0, leftEaveH) to (ridgeX, ridgeH)
+//   Right slope: from (ridgeX, ridgeH) to (wallWidth, rightEaveH)
+//
+// For symmetric gables: leftEaveH == rightEaveH, ridgeX == wallWidth/2
+//
+function computeGableAngleCuts(wallWidth, gable, panelCoverage, layoutPanels) {
+  const { leftEaveH, rightEaveH, ridgeH, ridgeX, leftPCH, rightPCH } = gable;
+  if (!ridgeH || (ridgeH <= leftEaveH && ridgeH <= rightEaveH)) {
+    // No gable — flat wall. Use the side-appropriate panel cut height.
+    return layoutPanels.map((p, idx) => {
+      let px = 0; for (let i = 0; i < idx; i++) px += layoutPanels[i].width;
+      const pch = (px + p.width / 2) <= ridgeX ? leftPCH : rightPCH;
+      return { ...p, gableCut: null, panelLength: pch };
+    });
+  }
+
+  // Left slope geometry
+  const leftRise = ridgeH - leftEaveH;
+  const leftRun = ridgeX;
+  const leftPitch = leftRun > 0 ? leftRise / leftRun : 0;
+  const leftAngle = leftRun > 0 ? Math.atan(leftPitch) * (180 / Math.PI) : 90;
+  const leftEaveOffset = leftEaveH - leftPCH;
+
+  // Right slope geometry
+  const rightRise = ridgeH - rightEaveH;
+  const rightRun = wallWidth - ridgeX;
+  const rightPitch = rightRun > 0 ? rightRise / rightRun : 0;
+  const rightAngle = rightRun > 0 ? Math.atan(rightPitch) * (180 / Math.PI) : 90;
+  const rightEaveOffset = rightEaveH - rightPCH;
+
+  return layoutPanels.map((panel, idx) => {
+    let panelLeftX = 0;
+    for (let i = 0; i < idx; i++) panelLeftX += layoutPanels[i].width;
+    const panelRightX = panelLeftX + panel.width;
+    const panelCenterX = panelLeftX + panel.width / 2;
+
+    // Structural height at any X position along the two slopes
+    const structH = (x) => {
+      if (x <= ridgeX) {
+        return leftRun > 0 ? leftEaveH + leftRise * (x / leftRun) : ridgeH;
+      } else {
+        return rightRun > 0 ? rightEaveH + rightRise * ((wallWidth - x) / rightRun) : ridgeH;
+      }
+    };
+
+    const structLeftH = structH(panelLeftX);
+    const structRightH = structH(panelRightX);
+
+    // Determine which side this panel is on for eave offset & panel cut height
+    const onLeftSide = panelCenterX <= ridgeX;
+    const localEaveH = onLeftSide ? leftEaveH : rightEaveH;
+    const localPCH = onLeftSide ? leftPCH : rightPCH;
+    const localEaveOffset = localEaveH - localPCH;
+    const localAngle = onLeftSide ? leftAngle : rightAngle;
+
+    // Panel that straddles the ridge: use peak at ridgeX
+    const straddlesRidge = panelLeftX < ridgeX && panelRightX > ridgeX;
+
+    // Actual panel cut heights (applying eave offset)
+    const leftCutH = structLeftH - (panelLeftX <= ridgeX ? leftEaveOffset : rightEaveOffset);
+    const rightCutH = structRightH - (panelRightX <= ridgeX ? leftEaveOffset : rightEaveOffset);
+
+    // Is any part of this panel above its local eave line?
+    const isAboveEave = structLeftH > localEaveH || structRightH > localEaveH || straddlesRidge;
+
+    if (!isAboveEave) {
+      return { ...panel, panelLength: localPCH, gableCut: null };
+    }
+
+    const actualLeftH = Math.round(leftCutH * 8) / 8;
+    const actualRightH = Math.round(rightCutH * 8) / 8;
+    const maxH = straddlesRidge
+      ? Math.round((ridgeH - Math.min(leftEaveOffset, rightEaveOffset)) * 8) / 8
+      : Math.max(actualLeftH, actualRightH);
+
+    // For panels straddling the ridge, note both angles
+    const slopeSide = straddlesRidge ? "ridge" : (onLeftSide ? "left" : "right");
+    const angle = straddlesRidge
+      ? Math.round(Math.max(leftAngle, rightAngle) * 100) / 100
+      : Math.round(localAngle * 100) / 100;
+
+    return {
+      ...panel,
+      panelLength: maxH,
+      gableCut: {
+        leftHeight: actualLeftH,
+        rightHeight: actualRightH,
+        angle: angle,
+        side: slopeSide,
+        cutDelta: Math.round(Math.abs(actualLeftH - actualRightH) * 8) / 8,
+        straddlesRidge: straddlesRidge,
+        leftAngle: straddlesRidge ? Math.round(leftAngle * 100) / 100 : undefined,
+        rightAngle: straddlesRidge ? Math.round(rightAngle * 100) / 100 : undefined,
+      },
+    };
+  });
+}
+
+function computeOpeningCuts(panels, openings, wallHeight) {
+  if (!openings || openings.length === 0) return panels.map(p => ({ ...p, cuts: [], hasOpening: false }));
+  return panels.map((panel, idx) => {
+    let panelLeftX = 0;
+    for (let i = 0; i < idx; i++) panelLeftX += panels[i].width;
+    const panelRightX = panelLeftX + panel.width;
+    const intersecting = openings.filter(op => {
+      const opRight = op.fromLeft + op.width;
+      return opRight > panelLeftX && op.fromLeft < panelRightX;
+    });
+    if (intersecting.length === 0) return { ...panel, cuts: [], hasOpening: false };
+    const cuts = intersecting.map(op => {
+      const opRight = op.fromLeft + op.width;
+      const cutLeft = Math.max(0, op.fromLeft - panelLeftX);
+      const cutRight = Math.min(panel.width, opRight - panelLeftX);
+      return {
+        type: op.type || "window",
+        label: op.label || "Opening",
+        cutFromLeft: Math.round(cutLeft * 8) / 8,
+        cutWidth: Math.round((cutRight - cutLeft) * 8) / 8,
+        cutFromBottom: op.fromBottom,
+        cutHeight: op.height,
+        fullWidth: cutLeft <= 0.5 && (panel.width - cutRight) <= 0.5,
+      };
+    });
+    return { ...panel, cuts, hasOpening: true };
+  });
+}
+
+// ─── DEFAULT DATA ───────────────────────────────────────────────────────────
+const DEFAULT_PROFILES = [
+  { id: "pbr36", name: 'PBR / R-Panel 36"', coverage: 36, overallWidth: 37.75, ribSpacing: 12, ribHeight: 1.25 },
+  { id: "ag26", name: 'AG Panel 26"', coverage: 26, overallWidth: 27.5, ribSpacing: 2.67, ribHeight: 0.5 },
+];
+
+// ─── STYLES ─────────────────────────────────────────────────────────────────
+const colors = {
+  bg: "#0F1117",
+  surface: "#1A1D27",
+  surfaceAlt: "#232734",
+  border: "#2E3345",
+  borderFocus: "#5B8AF0",
+  accent: "#5B8AF0",
+  accentDim: "#3D6AD6",
+  accentGlow: "rgba(91,138,240,0.15)",
+  warn: "#E8943A",
+  warnDim: "rgba(232,148,58,0.15)",
+  error: "#E05252",
+  success: "#4ADE80",
+  successDim: "rgba(74,222,128,0.15)",
+  text: "#E8ECF4",
+  textDim: "#8B92A8",
+  textMuted: "#5A6178",
+  panelFull: "#2A4A8C",
+  panelFullBorder: "#4470CC",
+  panelCut: "#8C4A2A",
+  panelCutBorder: "#CC7044",
+  opening: "#1A1D27",
+  openingBorder: "#E8943A",
+};
+
+// ─── COMPONENTS ─────────────────────────────────────────────────────────────
+
+function MeasurementInput({ value, onChange, label, placeholder = "e.g. 10-6-1/4", compact = false }) {
+  const [raw, setRaw] = useState(value != null ? String(value) : "");
+  const [valid, setValid] = useState(true);
+  const handleChange = (e) => {
+    const v = e.target.value;
+    setRaw(v);
+    const parsed = parseImperialInput(v);
+    if (parsed !== null) { setValid(true); onChange(parsed); }
+    else if (v === "") { setValid(true); onChange(null); }
+    else setValid(false);
+  };
+  const parsed = parseImperialInput(raw);
+  const imperial = parsed != null ? decToImperial(parsed) : null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: compact ? "1" : undefined }}>
+      {label && <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>{label}</label>}
+      <input
+        value={raw}
+        onChange={handleChange}
+        placeholder={placeholder}
+        style={{
+          background: colors.surfaceAlt, border: `1px solid ${valid ? colors.border : colors.error}`, borderRadius: 6,
+          color: colors.text, padding: compact ? "8px 10px" : "10px 12px", fontSize: 14, fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+          outline: "none", width: "100%", boxSizing: "border-box", transition: "border-color 0.2s",
+        }}
+        onFocus={(e) => e.target.style.borderColor = colors.borderFocus}
+        onBlur={(e) => e.target.style.borderColor = valid ? colors.border : colors.error}
+      />
+      {imperial && (
+        <span style={{ fontSize: 11, color: colors.accent, fontFamily: "monospace" }}>{imperial.displayWithTotal}</span>
+      )}
+    </div>
+  );
+}
+
+function Button({ children, onClick, variant = "primary", size = "md", style: extraStyle = {}, disabled = false }) {
+  const baseStyle = {
+    border: "none", borderRadius: 6, cursor: disabled ? "not-allowed" : "pointer", fontWeight: 600,
+    fontSize: size === "sm" ? 12 : 13, padding: size === "sm" ? "6px 12px" : "10px 18px",
+    transition: "all 0.2s", opacity: disabled ? 0.5 : 1, fontFamily: "inherit", letterSpacing: "0.02em",
+    display: "inline-flex", alignItems: "center", gap: 6,
+  };
+  const variants = {
+    primary: { background: colors.accent, color: "#fff" },
+    secondary: { background: colors.surfaceAlt, color: colors.text, border: `1px solid ${colors.border}` },
+    danger: { background: "rgba(224,82,82,0.15)", color: colors.error, border: `1px solid rgba(224,82,82,0.3)` },
+    ghost: { background: "transparent", color: colors.textDim },
+    success: { background: colors.successDim, color: colors.success, border: `1px solid rgba(74,222,128,0.3)` },
+  };
+  return <button onClick={onClick} disabled={disabled} style={{ ...baseStyle, ...variants[variant], ...extraStyle }}>{children}</button>;
+}
+
+function Card({ children, title, style: extraStyle = {}, headerRight = null }) {
+  return (
+    <div style={{ background: colors.surface, border: `1px solid ${colors.border}`, borderRadius: 10, padding: 20, ...extraStyle }}>
+      {title && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <h3 style={{ margin: 0, fontSize: 14, fontWeight: 700, color: colors.text, letterSpacing: "0.02em" }}>{title}</h3>
+          {headerRight}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function TabBar({ tabs, active, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 2, background: colors.surfaceAlt, borderRadius: 8, padding: 3 }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => onChange(t.id)}
+          style={{
+            flex: 1, padding: "10px 16px", border: "none", borderRadius: 6, cursor: "pointer",
+            background: active === t.id ? colors.accent : "transparent",
+            color: active === t.id ? "#fff" : colors.textDim,
+            fontSize: 13, fontWeight: 600, fontFamily: "inherit", transition: "all 0.2s",
+          }}
+        >{t.label}</button>
+      ))}
+    </div>
+  );
+}
+
+// ─── PANEL LAYOUT CANVAS ────────────────────────────────────────────────────
+function LayoutCanvas({ panels, wallWidth, wallHeight, panelCutHeight, openings = [], isGable = false, ridgeHeight = 0, ridgeX, leftEaveH, rightEaveH, leftPanelCutHeight, rightPanelCutHeight }) {
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container || !panels || panels.length === 0) return;
+    const ctx = canvas.getContext("2d");
+    const cw = container.offsetWidth;
+    const padding = 40;
+    const dimSpace = 30;
+    const totalW = cw;
+    const drawW = totalW - padding * 2 - dimSpace;
+
+    const lEave = isGable ? (leftEaveH || wallHeight) : wallHeight;
+    const rEave = isGable ? (rightEaveH || wallHeight) : wallHeight;
+    const peakX = ridgeX || wallWidth / 2;
+    const maxH = isGable && ridgeHeight > Math.max(lEave, rEave) ? ridgeHeight : Math.max(lEave, rEave, wallHeight);
+
+    const aspect = maxH / (wallWidth || 360);
+    const drawH = Math.min(drawW * aspect, 350);
+    const totalH = drawH + padding * 2 + dimSpace + (isGable ? 80 : 0);
+    canvas.width = totalW * 2; canvas.height = totalH * 2;
+    canvas.style.width = totalW + "px"; canvas.style.height = totalH + "px";
+    ctx.scale(2, 2);
+    ctx.clearRect(0, 0, totalW, totalH);
+    const scaleX = drawW / wallWidth;
+    const scaleY = drawH / maxH;
+    const ox = padding + dimSpace;
+    const oy = padding + (isGable ? 40 : 0);
+    // Draw wall outline
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    if (isGable && ridgeHeight > Math.min(lEave, rEave)) {
+      ctx.beginPath();
+      ctx.moveTo(ox, oy + (maxH - lEave) * scaleY);
+      ctx.lineTo(ox + peakX * scaleX, oy + (maxH - ridgeHeight) * scaleY);
+      ctx.lineTo(ox + wallWidth * scaleX, oy + (maxH - rEave) * scaleY);
+      ctx.lineTo(ox + wallWidth * scaleX, oy + maxH * scaleY);
+      ctx.lineTo(ox, oy + maxH * scaleY);
+      ctx.closePath();
+      ctx.stroke();
+      // Ridge line indicator
+      ctx.strokeStyle = colors.accent;
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(ox + peakX * scaleX, oy + (maxH - ridgeHeight) * scaleY);
+      ctx.lineTo(ox + peakX * scaleX, oy + maxH * scaleY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    } else {
+      ctx.strokeRect(ox, oy, drawW, drawH);
+    }
+    // Draw panels
+    let xOff = 0;
+    panels.forEach((panel) => {
+      const px = ox + xOff * scaleX;
+      const pw = panel.width * scaleX;
+      const pLen = panel.panelLength || wallHeight;
+      const ph = pLen * scaleY;
+      const py = oy + (maxH - pLen) * scaleY;
+      const isCut = panel.position !== "full";
+      ctx.fillStyle = isCut ? "rgba(140,74,42,0.25)" : "rgba(42,74,140,0.25)";
+      if (isGable && panel.gableCut) {
+        const lh = panel.gableCut.leftHeight * scaleY;
+        const rh = panel.gableCut.rightHeight * scaleY;
+        ctx.beginPath();
+        ctx.moveTo(px, oy + (maxH - panel.gableCut.leftHeight) * scaleY);
+        ctx.lineTo(px + pw, oy + (maxH - panel.gableCut.rightHeight) * scaleY);
+        ctx.lineTo(px + pw, oy + maxH * scaleY);
+        ctx.lineTo(px, oy + maxH * scaleY);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = isCut ? colors.panelCutBorder : colors.panelFullBorder;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      } else {
+        ctx.fillRect(px, py, pw, ph);
+        ctx.strokeStyle = isCut ? colors.panelCutBorder : colors.panelFullBorder;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(px, py, pw, ph);
+      }
+      // Panel number
+      ctx.fillStyle = colors.textDim;
+      ctx.font = "bold 10px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(`#${panel.index}`, px + pw / 2, oy + maxH * scaleY - 6);
+      // Width dimension on top
+      ctx.fillStyle = isCut ? colors.panelCutBorder : colors.textMuted;
+      ctx.font = "9px monospace";
+      const topY = isGable && panel.gableCut ? oy + (maxH - Math.max(panel.gableCut.leftHeight, panel.gableCut.rightHeight)) * scaleY - 8 : py - 8;
+      if (isCut) ctx.fillText(decToImperial(panel.width).display, px + pw / 2, topY);
+      xOff += panel.width;
+    });
+    // Draw openings
+    openings.forEach(op => {
+      const opx = ox + op.fromLeft * scaleX;
+      const opw = op.width * scaleX;
+      const opy = oy + (maxH - op.fromBottom - op.height) * scaleY;
+      const oph = op.height * scaleY;
+      ctx.fillStyle = "rgba(15,17,23,0.8)";
+      ctx.fillRect(opx, opy, opw, oph);
+      ctx.strokeStyle = colors.warn;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(opx, opy, opw, oph);
+      ctx.setLineDash([]);
+      ctx.fillStyle = colors.warn;
+      ctx.font = "bold 9px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(op.label || op.type, opx + opw / 2, opy + oph / 2 + 3);
+    });
+    // Dimension lines — bottom: total width
+    ctx.fillStyle = colors.textDim;
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    const by = oy + maxH * scaleY + 18;
+    ctx.strokeStyle = colors.textMuted;
+    ctx.lineWidth = 0.5;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(ox, by - 4); ctx.lineTo(ox, by + 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox + drawW, by - 4); ctx.lineTo(ox + drawW, by + 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox, by); ctx.lineTo(ox + drawW, by); ctx.stroke();
+    ctx.fillText(decToImperial(wallWidth).displayWithTotal, ox + drawW / 2, by + 14);
+    // Left: eave height labels
+    ctx.save();
+    ctx.translate(ox - 18, oy + (maxH * scaleY) / 2);
+    ctx.rotate(-Math.PI / 2);
+    if (isGable && lEave !== rEave) {
+      ctx.fillText(`L Eave: ${decToImperial(lEave).display}`, 0, 0);
+    } else {
+      ctx.fillText(`Eave: ${decToImperial(wallHeight).display}`, 0, 0);
+    }
+    ctx.restore();
+    // Right eave label (if asymmetric)
+    if (isGable && lEave !== rEave) {
+      ctx.save();
+      ctx.translate(ox + drawW + 14, oy + (maxH * scaleY) / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.fillText(`R Eave: ${decToImperial(rEave).display}`, 0, 0);
+      ctx.restore();
+    }
+    // Panel cut height indicators
+    if (!isGable) {
+      const pch = panelCutHeight || wallHeight;
+      if (pch && pch !== wallHeight) {
+        const pchY = oy + (maxH - pch) * scaleY;
+        ctx.strokeStyle = colors.success;
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(ox, pchY); ctx.lineTo(ox + drawW, pchY); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = colors.success;
+        ctx.font = "9px monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(`Panel cut: ${decToImperial(pch).display}`, ox + 4, pchY - 4);
+      }
+    }
+    // Ridge label
+    if (isGable && ridgeHeight > Math.min(lEave, rEave)) {
+      ctx.fillStyle = colors.accent;
+      ctx.font = "9px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(`Ridge: ${decToImperial(ridgeHeight).display}`, ox + peakX * scaleX, oy + (maxH - ridgeHeight) * scaleY - 6);
+      // Ridge X offset label
+      if (peakX !== wallWidth / 2) {
+        ctx.fillStyle = colors.textMuted;
+        ctx.font = "8px monospace";
+        ctx.fillText(`(${decToImperial(peakX).display} from left)`, ox + peakX * scaleX, oy + maxH * scaleY + 10);
+      }
+    }
+  }, [panels, wallWidth, wallHeight, panelCutHeight, openings, isGable, ridgeHeight, ridgeX, leftEaveH, rightEaveH]);
+
+  return (
+    <div ref={containerRef} style={{ width: "100%", overflow: "hidden" }}>
+      <canvas ref={canvasRef} style={{ display: "block", width: "100%" }} />
+    </div>
+  );
+}
+
+// ─── OPENING EDITOR ─────────────────────────────────────────────────────────
+function OpeningEditor({ openings, onChange, wallWidth, wallHeight }) {
+  const addOpening = () => {
+    onChange([...openings, { id: Date.now(), type: "window", label: "W" + (openings.length + 1), fromLeft: 48, fromBottom: 36, width: 36, height: 48 }]);
+  };
+  const update = (id, field, val) => {
+    onChange(openings.map(o => o.id === id ? { ...o, [field]: val } : o));
+  };
+  const remove = (id) => onChange(openings.filter(o => o.id !== id));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ fontSize: 12, color: colors.textDim, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+          Openings ({openings.length})
+        </span>
+        <Button onClick={addOpening} size="sm" variant="secondary">+ Add Opening</Button>
+      </div>
+      {openings.map(op => (
+        <div key={op.id} style={{ background: colors.surfaceAlt, borderRadius: 8, padding: 12, border: `1px solid ${colors.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <select value={op.type} onChange={(e) => update(op.id, "type", e.target.value)}
+                style={{ background: colors.bg, color: colors.text, border: `1px solid ${colors.border}`, borderRadius: 4, padding: "4px 8px", fontSize: 12, fontFamily: "inherit" }}>
+                <option value="window">Window</option>
+                <option value="door">Door</option>
+                <option value="ohd">OH Door</option>
+                <option value="louver">Louver</option>
+                <option value="other">Other</option>
+              </select>
+              <input value={op.label} onChange={(e) => update(op.id, "label", e.target.value)}
+                style={{ background: colors.bg, color: colors.text, border: `1px solid ${colors.border}`, borderRadius: 4, padding: "4px 8px", fontSize: 12, width: 60, fontFamily: "monospace" }}
+                placeholder="Label" />
+            </div>
+            <Button onClick={() => remove(op.id)} variant="danger" size="sm">Remove</Button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <MeasurementInput label="From Left" value={op.fromLeft} onChange={(v) => v != null && update(op.id, "fromLeft", v)} compact />
+            <MeasurementInput label="From Bottom" value={op.fromBottom} onChange={(v) => v != null && update(op.id, "fromBottom", v)} compact />
+            <MeasurementInput label="Width" value={op.width} onChange={(v) => v != null && update(op.id, "width", v)} compact />
+            <MeasurementInput label="Height" value={op.height} onChange={(v) => v != null && update(op.id, "height", v)} compact />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── CUT LIST DISPLAY ───────────────────────────────────────────────────────
+function CutListDisplay({ walls }) {
+  if (!walls || walls.length === 0) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {walls.map((wall, wi) => {
+        if (!wall.selectedVariation || !wall.computedPanels) return null;
+        return (
+          <Card key={wi} title={`${wall.name} — Cut List`} style={{ background: colors.bg }}>
+            <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12, color: colors.text, lineHeight: 1.8 }}>
+              <div style={{ color: colors.textDim, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
+                <div>Wall: {decToImperial(wall.width).displayWithTotal} wide × {decToImperial(wall.height).displayWithTotal} eave height</div>
+                <div>Panel Cut Height: {decToImperial(wall.panelCutHeight || wall.height).displayWithTotal}{wall.panelCutHeight && wall.panelCutHeight !== wall.height ? ` (${decToImperial(wall.height - wall.panelCutHeight).display} below eave)` : ""}</div>
+                <div>Profile: {wall.profileName} · Coverage: {decToImperial(wall.profileCoverage).display}</div>
+                <div>Layout: {wall.selectedVariation.name}</div>
+                {wall.isGable && (
+                  <div style={{ color: colors.accent }}>
+                    Gable End · Ridge: {decToImperial(wall.ridgeHeight).displayWithTotal}
+                    {wall.ridgeX && wall.width && wall.ridgeX !== wall.width / 2 ? ` · Ridge X: ${decToImperial(wall.ridgeX).display} from left` : ""}
+                    {wall.leftEaveH && wall.rightEaveH && wall.leftEaveH !== wall.rightEaveH
+                      ? ` · L Eave: ${decToImperial(wall.leftEaveH).display} · R Eave: ${decToImperial(wall.rightEaveH).display}`
+                      : ""}
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 1fr 1fr", gap: "4px 12px", fontSize: 11 }}>
+                <div style={{ color: colors.textMuted, fontWeight: 700 }}>#</div>
+                <div style={{ color: colors.textMuted, fontWeight: 700 }}>WIDTH</div>
+                <div style={{ color: colors.textMuted, fontWeight: 700 }}>LENGTH</div>
+                <div style={{ color: colors.textMuted, fontWeight: 700 }}>NOTES</div>
+                {wall.computedPanels.map((p, pi) => {
+                  const isCut = p.position !== "full";
+                  const notes = [];
+                  if (isCut) notes.push(`CUT to ${decToImperial(p.width).display}`);
+                  if (p.gableCut) {
+                    if (p.gableCut.straddlesRidge) {
+                      notes.push(`RIDGE PANEL · L angle ${p.gableCut.leftAngle}° · R angle ${p.gableCut.rightAngle}°`);
+                    } else {
+                      notes.push(`Angle ${p.gableCut.angle}° ${p.gableCut.side}`);
+                    }
+                    notes.push(`L:${decToImperial(p.gableCut.leftHeight).display} R:${decToImperial(p.gableCut.rightHeight).display}`);
+                  }
+                  if (p.hasOpening && p.cuts) {
+                    p.cuts.forEach(c => notes.push(`Notch: ${c.label} @ ${decToImperial(c.cutFromLeft).display} from edge`));
+                  }
+                  return (
+                    <React.Fragment key={pi}>
+                      <div style={{ color: colors.textDim }}>{p.index}</div>
+                      <div style={{ color: isCut ? colors.panelCutBorder : colors.text }}>
+                        {isCut ? decToImperial(p.width).displayWithTotal : "FULL"}
+                      </div>
+                      <div style={{ color: p.gableCut ? colors.accent : colors.text }}>
+                        {decToImperial(p.panelLength || wall.height).displayWithTotal}
+                      </div>
+                      <div style={{ color: notes.length > 0 ? colors.warn : colors.textMuted, fontSize: 10 }}>
+                        {notes.length > 0 ? notes.join(" · ") : "—"}
+                      </div>
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop: 12, paddingTop: 8, borderTop: `1px solid ${colors.border}`, color: colors.textDim, fontSize: 11 }}>
+                Total panels: {wall.computedPanels.length} · Full sheets needed: {wall.selectedVariation.sheetsNeeded} ·
+                Waste: {decToImperial(wall.selectedVariation.wasteInches).display} ({wall.selectedVariation.wastePercent.toFixed(1)}%)
+              </div>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── EXPORT ─────────────────────────────────────────────────────────────────
+function generateExportText(walls, projectName) {
+  let text = `╔══════════════════════════════════════════╗\n`;
+  text += `║  PANEL CUT LIST — ${projectName || "Project"}  \n`;
+  text += `║  Generated: ${new Date().toLocaleDateString()}              \n`;
+  text += `╚══════════════════════════════════════════╝\n\n`;
+  walls.forEach((wall, wi) => {
+    if (!wall.selectedVariation || !wall.computedPanels) return;
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `  ${wall.name}\n`;
+    text += `  ${decToImperial(wall.width).displayWithTotal} W × ${decToImperial(wall.height).displayWithTotal} Eave H\n`;
+    text += `  Panel Cut Height: ${decToImperial(wall.panelCutHeight || wall.height).displayWithTotal}${wall.panelCutHeight && wall.panelCutHeight !== wall.height ? ` (${decToImperial(wall.height - wall.panelCutHeight).display} below eave)` : ""}\n`;
+    text += `  Profile: ${wall.profileName} (${decToImperial(wall.profileCoverage).display} coverage)\n`;
+    text += `  Layout: ${wall.selectedVariation.name}\n`;
+    if (wall.isGable) {
+      const lEave = wall.leftEaveH || wall.height;
+      const rEave = wall.rightEaveH || wall.height;
+      const rX = wall.ridgeX || wall.width / 2;
+      text += `  Gable End · Ridge: ${decToImperial(wall.ridgeHeight).displayWithTotal}`;
+      if (rX !== wall.width / 2) text += ` · Ridge X: ${decToImperial(rX).display} from left`;
+      text += `\n`;
+      if (lEave !== rEave) {
+        text += `  L Eave: ${decToImperial(lEave).display} · R Eave: ${decToImperial(rEave).display}\n`;
+      }
+      if (wall.leftPanelCutHeight || wall.rightPanelCutHeight) {
+        text += `  L Panel Cut: ${decToImperial(wall.leftPanelCutHeight || lEave).display} · R Panel Cut: ${decToImperial(wall.rightPanelCutHeight || rEave).display}\n`;
+      }
+    }
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    text += `  #   WIDTH              LENGTH             NOTES\n`;
+    text += `  ─── ────────────────── ────────────────── ──────────────────\n`;
+    wall.computedPanels.forEach(p => {
+      const isCut = p.position !== "full";
+      const w = isCut ? decToImperial(p.width).displayWithTotal.padEnd(18) : "FULL".padEnd(18);
+      const l = decToImperial(p.panelLength || wall.height).displayWithTotal.padEnd(18);
+      const notes = [];
+      if (isCut) notes.push(`CUT`);
+      if (p.gableCut) {
+        if (p.gableCut.straddlesRidge) {
+          notes.push(`RIDGE | L:${p.gableCut.leftAngle}° R:${p.gableCut.rightAngle}° | L:${decToImperial(p.gableCut.leftHeight).display} R:${decToImperial(p.gableCut.rightHeight).display}`);
+        } else {
+          notes.push(`${p.gableCut.angle}° ${p.gableCut.side} | L:${decToImperial(p.gableCut.leftHeight).display} R:${decToImperial(p.gableCut.rightHeight).display}`);
+        }
+      }
+      if (p.hasOpening && p.cuts) p.cuts.forEach(c => notes.push(`Notch:${c.label}`));
+      text += `  ${String(p.index).padEnd(3)} ${w} ${l} ${notes.join(" · ")}\n`;
+    });
+    text += `\n  Panels: ${wall.computedPanels.length} · Sheets: ${wall.selectedVariation.sheetsNeeded} · Waste: ${decToImperial(wall.selectedVariation.wasteInches).display} (${wall.selectedVariation.wastePercent.toFixed(1)}%)\n\n`;
+  });
+  // Summary
+  const totalPanels = walls.reduce((s, w) => s + (w.computedPanels?.length || 0), 0);
+  const totalSheets = walls.reduce((s, w) => s + (w.selectedVariation?.sheetsNeeded || 0), 0);
+  text += `══════════════════════════════════════════\n`;
+  text += `  PROJECT SUMMARY\n`;
+  text += `  Total panels across all walls: ${totalPanels}\n`;
+  text += `  Total sheets to order: ${totalSheets}\n`;
+  text += `══════════════════════════════════════════\n`;
+  return text;
+}
+
+// ─── WALL EDITOR ────────────────────────────────────────────────────────────
+function WallEditor({ wall, profiles, onUpdate, onRemove }) {
+  const [showOpenings, setShowOpenings] = useState(false);
+  const profile = profiles.find(p => p.id === wall.profileId) || profiles[0];
+  const variations = useMemo(() => {
+    if (!wall.width || !profile) return [];
+    return generateLayoutVariations(wall.width, profile.coverage);
+  }, [wall.width, profile?.coverage]);
+
+  const selectedVar = wall.selectedVariationId ? variations.find(v => v.id === wall.selectedVariationId) : variations[0];
+
+  const computedPanels = useMemo(() => {
+    if (!selectedVar || !wall.height) return [];
+    // Build gable geometry object for asymmetric support
+    // Symmetric: leftEaveH == rightEaveH == wall.height, ridgeX == wallWidth/2
+    // Asymmetric: independent left/right eave heights, ridge offset
+    const leftEaveH = wall.isGable ? (wall.leftEaveH || wall.height) : wall.height;
+    const rightEaveH = wall.isGable ? (wall.rightEaveH || wall.height) : wall.height;
+    const leftPCH = wall.isGable ? (wall.leftPanelCutHeight || wall.panelCutHeight || leftEaveH) : (wall.panelCutHeight || wall.height);
+    const rightPCH = wall.isGable ? (wall.rightPanelCutHeight || wall.panelCutHeight || rightEaveH) : (wall.panelCutHeight || wall.height);
+    const ridgeX = wall.isGable ? (wall.ridgeX || wall.width / 2) : wall.width / 2;
+
+    let panels = [...selectedVar.panels];
+    if (wall.isGable && wall.ridgeHeight && (wall.ridgeHeight > leftEaveH || wall.ridgeHeight > rightEaveH)) {
+      const gable = { leftEaveH, rightEaveH, ridgeH: wall.ridgeHeight, ridgeX, leftPCH, rightPCH };
+      panels = computeGableAngleCuts(wall.width, gable, profile.coverage, panels);
+    } else {
+      const pch = wall.panelCutHeight || wall.height;
+      panels = panels.map(p => ({ ...p, panelLength: pch }));
+    }
+    if (wall.openings && wall.openings.length > 0) {
+      panels = computeOpeningCuts(panels, wall.openings, wall.height);
+    }
+    return panels;
+  }, [selectedVar, wall.height, wall.panelCutHeight, wall.isGable, wall.ridgeHeight, wall.leftEaveH, wall.rightEaveH, wall.leftPanelCutHeight, wall.rightPanelCutHeight, wall.ridgeX, wall.openings, wall.width, profile?.coverage]);
+
+  useEffect(() => {
+    if (selectedVar && computedPanels.length > 0) {
+      onUpdate({
+        selectedVariation: selectedVar,
+        computedPanels,
+        profileName: profile.name,
+        profileCoverage: profile.coverage,
+        panelCutHeight: wall.panelCutHeight,
+      });
+    }
+  }, [selectedVar?.id, computedPanels.length]);
+
+  return (
+    <Card title={wall.name} headerRight={<Button onClick={onRemove} variant="danger" size="sm">Remove Wall</Button>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        {/* Wall Name & Profile */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>Wall Name</label>
+            <input value={wall.name} onChange={(e) => onUpdate({ name: e.target.value })}
+              style={{ background: colors.surfaceAlt, border: `1px solid ${colors.border}`, borderRadius: 6, color: colors.text, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", outline: "none" }} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>Panel Profile</label>
+            <select value={wall.profileId} onChange={(e) => onUpdate({ profileId: e.target.value })}
+              style={{ background: colors.surfaceAlt, border: `1px solid ${colors.border}`, borderRadius: 6, color: colors.text, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", outline: "none" }}>
+              {profiles.map(p => <option key={p.id} value={p.id}>{p.name} ({p.coverage}")</option>)}
+            </select>
+          </div>
+        </div>
+        {/* Dimensions — base wall */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <MeasurementInput label="Wall Width" value={wall.width} onChange={(v) => onUpdate({ width: v })} />
+          <MeasurementInput label="Eave Height (sidewall default)" value={wall.height} onChange={(v) => onUpdate({ height: v })} placeholder="Structural eave height" />
+        </div>
+        {/* Panel Cut Height — non-gable walls */}
+        {!wall.isGable && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <MeasurementInput label="Panel Cut Height (base to underside of eave)" value={wall.panelCutHeight} onChange={(v) => onUpdate({ panelCutHeight: v })} placeholder="Defaults to eave height" />
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, justifyContent: "flex-end" }}>
+              {wall.height && wall.panelCutHeight && wall.panelCutHeight !== wall.height && (
+                <span style={{ fontSize: 11, color: colors.warn, fontFamily: "monospace" }}>
+                  Eave offset: {decToImperial(wall.height - wall.panelCutHeight).display} shorter than eave
+                </span>
+              )}
+              {wall.height && !wall.panelCutHeight && (
+                <span style={{ fontSize: 11, color: colors.textMuted, fontFamily: "monospace" }}>
+                  Defaults to eave height if left blank
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {/* Gable toggle */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: colors.text }}>
+            <input type="checkbox" checked={wall.isGable || false} onChange={(e) => onUpdate({ isGable: e.target.checked })}
+              style={{ accentColor: colors.accent, width: 16, height: 16 }} />
+            Gable End Wall
+          </label>
+          {wall.isGable && (
+            <div style={{ background: colors.surfaceAlt, borderRadius: 8, padding: 14, border: `1px solid ${colors.border}`, display: "flex", flexDirection: "column", gap: 14 }}>
+              {/* Ridge */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <MeasurementInput label="Ridge Height (peak)" value={wall.ridgeHeight} onChange={(v) => onUpdate({ ridgeHeight: v })} compact placeholder="e.g. 16-0" />
+                <MeasurementInput label="Ridge X Offset (from left)" value={wall.ridgeX} onChange={(v) => onUpdate({ ridgeX: v })} compact placeholder={wall.width ? `Center: ${decToImperial(wall.width / 2).display}` : "e.g. 25-0"} />
+              </div>
+              {wall.width && !wall.ridgeX && (
+                <span style={{ fontSize: 10, color: colors.textMuted, fontFamily: "monospace", marginTop: -8 }}>
+                  Ridge X defaults to center ({decToImperial(wall.width / 2).display}) if left blank
+                </span>
+              )}
+              {/* Left side */}
+              <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 10 }}>
+                <div style={{ fontSize: 10, color: colors.accent, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Left Side</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <MeasurementInput label="Left Eave Height" value={wall.leftEaveH} onChange={(v) => onUpdate({ leftEaveH: v })} compact placeholder={wall.height ? `Same as eave: ${decToImperial(wall.height).display}` : ""} />
+                  <MeasurementInput label="Left Panel Cut Height" value={wall.leftPanelCutHeight} onChange={(v) => onUpdate({ leftPanelCutHeight: v })} compact placeholder="Defaults to left eave" />
+                </div>
+              </div>
+              {/* Right side */}
+              <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 10 }}>
+                <div style={{ fontSize: 10, color: colors.accent, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 8 }}>Right Side</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <MeasurementInput label="Right Eave Height" value={wall.rightEaveH} onChange={(v) => onUpdate({ rightEaveH: v })} compact placeholder={wall.height ? `Same as eave: ${decToImperial(wall.height).display}` : ""} />
+                  <MeasurementInput label="Right Panel Cut Height" value={wall.rightPanelCutHeight} onChange={(v) => onUpdate({ rightPanelCutHeight: v })} compact placeholder="Defaults to right eave" />
+                </div>
+              </div>
+              {/* Computed gable info */}
+              {wall.ridgeHeight && wall.width && (() => {
+                const lEave = wall.leftEaveH || wall.height;
+                const rEave = wall.rightEaveH || wall.height;
+                const rX = wall.ridgeX || wall.width / 2;
+                const lRise = wall.ridgeHeight - lEave;
+                const rRise = wall.ridgeHeight - rEave;
+                const lRun = rX;
+                const rRun = wall.width - rX;
+                const lPitch = lRun > 0 ? (lRise / lRun) * 12 : 0;
+                const rPitch = rRun > 0 ? (rRise / rRun) * 12 : 0;
+                const lAngle = lRun > 0 ? Math.atan(lRise / lRun) * (180 / Math.PI) : 90;
+                const rAngle = rRun > 0 ? Math.atan(rRise / rRun) * (180 / Math.PI) : 90;
+                const isAsymmetric = lEave !== rEave || rX !== wall.width / 2;
+                return (
+                  <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 11, fontFamily: "monospace", color: colors.accent, lineHeight: 1.6 }}>
+                    <div>
+                      <div style={{ color: colors.textDim, fontWeight: 700, fontSize: 10 }}>LEFT SLOPE</div>
+                      <div>Rise: {decToImperial(lRise).display}</div>
+                      <div>Run: {decToImperial(lRun).display}</div>
+                      <div>Pitch: {lPitch.toFixed(2)}/12</div>
+                      <div>Angle: {lAngle.toFixed(2)}°</div>
+                    </div>
+                    <div>
+                      <div style={{ color: colors.textDim, fontWeight: 700, fontSize: 10 }}>RIGHT SLOPE</div>
+                      <div>Rise: {decToImperial(rRise).display}</div>
+                      <div>Run: {decToImperial(rRun).display}</div>
+                      <div>Pitch: {rPitch.toFixed(2)}/12</div>
+                      <div>Angle: {rAngle.toFixed(2)}°</div>
+                    </div>
+                    {isAsymmetric && (
+                      <div style={{ gridColumn: "1 / -1", color: colors.warn, fontSize: 10, fontWeight: 600 }}>
+                        ⚠ Asymmetric gable — left and right slopes differ
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </div>
+        {/* Openings */}
+        <div>
+          <Button onClick={() => setShowOpenings(!showOpenings)} variant="secondary" size="sm">
+            {showOpenings ? "Hide" : "Show"} Openings ({wall.openings?.length || 0})
+          </Button>
+          {showOpenings && (
+            <div style={{ marginTop: 12 }}>
+              <OpeningEditor
+                openings={wall.openings || []}
+                onChange={(ops) => onUpdate({ openings: ops })}
+                wallWidth={wall.width}
+                wallHeight={wall.height}
+              />
+            </div>
+          )}
+        </div>
+        {/* Layout Variations */}
+        {wall.width > 0 && wall.height > 0 && variations.length > 0 && (
+          <div>
+            <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 8, display: "block" }}>
+              Layout Variations (select one)
+            </label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {variations.map(v => (
+                <div key={v.id} onClick={() => onUpdate({ selectedVariationId: v.id })}
+                  style={{
+                    background: (wall.selectedVariationId || variations[0]?.id) === v.id ? colors.accentGlow : colors.surfaceAlt,
+                    border: `1px solid ${(wall.selectedVariationId || variations[0]?.id) === v.id ? colors.accent : colors.border}`,
+                    borderRadius: 8, padding: "10px 14px", cursor: "pointer", transition: "all 0.2s",
+                  }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>{v.name}</div>
+                      <div style={{ fontSize: 11, color: colors.textDim, marginTop: 2 }}>{v.description}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: v.wasteInches === 0 ? colors.success : colors.warn, fontFamily: "monospace" }}>
+                        {v.wastePercent.toFixed(1)}% waste
+                      </div>
+                      <div style={{ fontSize: 10, color: colors.textMuted }}>{v.totalPanels} panels</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {/* Canvas Preview */}
+        {selectedVar && computedPanels.length > 0 && (
+          <div style={{ borderTop: `1px solid ${colors.border}`, paddingTop: 16 }}>
+            <LayoutCanvas
+              panels={computedPanels}
+              wallWidth={wall.width}
+              wallHeight={wall.height}
+              panelCutHeight={wall.panelCutHeight}
+              openings={wall.openings || []}
+              isGable={wall.isGable}
+              ridgeHeight={wall.ridgeHeight}
+              ridgeX={wall.ridgeX}
+              leftEaveH={wall.leftEaveH}
+              rightEaveH={wall.rightEaveH}
+              leftPanelCutHeight={wall.leftPanelCutHeight}
+              rightPanelCutHeight={wall.rightPanelCutHeight}
+            />
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// ─── PROFILE MANAGER ────────────────────────────────────────────────────────
+function ProfileManager({ profiles, onChange }) {
+  const [editing, setEditing] = useState(null);
+  const [draft, setDraft] = useState({});
+  const startEdit = (p) => { setEditing(p.id); setDraft({ ...p }); };
+  const startNew = () => {
+    const id = "custom-" + Date.now();
+    setEditing(id);
+    setDraft({ id, name: "New Profile", coverage: 36, overallWidth: 37.75, ribSpacing: 12, ribHeight: 1.25 });
+  };
+  const save = () => {
+    if (!draft.name || !draft.coverage) return;
+    const exists = profiles.find(p => p.id === draft.id);
+    if (exists) onChange(profiles.map(p => p.id === draft.id ? draft : p));
+    else onChange([...profiles, draft]);
+    setEditing(null);
+  };
+  const remove = (id) => { onChange(profiles.filter(p => p.id !== id)); setEditing(null); };
+  return (
+    <Card title="Panel Profiles" headerRight={<Button onClick={startNew} size="sm" variant="secondary">+ Add Profile</Button>}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {profiles.map(p => (
+          <div key={p.id} style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            background: colors.surfaceAlt, borderRadius: 6, padding: "10px 14px", border: `1px solid ${colors.border}`,
+          }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: colors.text }}>{p.name}</div>
+              <div style={{ fontSize: 11, color: colors.textDim }}>Coverage: {p.coverage}" · Overall: {p.overallWidth}" · Rib: {p.ribHeight}" @ {p.ribSpacing}" o.c.</div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Button onClick={() => startEdit(p)} variant="ghost" size="sm">Edit</Button>
+              <Button onClick={() => remove(p.id)} variant="danger" size="sm">×</Button>
+            </div>
+          </div>
+        ))}
+        {editing && (
+          <div style={{ background: colors.bg, border: `1px solid ${colors.accent}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, textTransform: "uppercase" }}>Profile Name</label>
+                <input value={draft.name || ""} onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                  style={{ background: colors.surfaceAlt, border: `1px solid ${colors.border}`, borderRadius: 6, color: colors.text, padding: "8px 10px", fontSize: 13, fontFamily: "inherit", outline: "none" }} />
+              </div>
+              <MeasurementInput label="Coverage Width (in)" value={draft.coverage} onChange={(v) => setDraft({ ...draft, coverage: v })} compact />
+              <MeasurementInput label="Overall Width (in)" value={draft.overallWidth} onChange={(v) => setDraft({ ...draft, overallWidth: v })} compact />
+              <MeasurementInput label="Rib Spacing (in)" value={draft.ribSpacing} onChange={(v) => setDraft({ ...draft, ribSpacing: v })} compact />
+              <MeasurementInput label="Rib Height (in)" value={draft.ribHeight} onChange={(v) => setDraft({ ...draft, ribHeight: v })} compact />
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Button onClick={() => setEditing(null)} variant="secondary" size="sm">Cancel</Button>
+              <Button onClick={save} size="sm">Save Profile</Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+// ─── MAIN APP ───────────────────────────────────────────────────────────────
+export default function MetalPanelLayoutApp() {
+  const [profiles, setProfiles] = useState(DEFAULT_PROFILES);
+  const [walls, setWalls] = useState([]);
+  const [projectName, setProjectName] = useState("New Project");
+  const [activeTab, setActiveTab] = useState("layout");
+  const [showExport, setShowExport] = useState(false);
+
+  const addWall = () => {
+    setWalls([...walls, {
+      id: Date.now(),
+      name: `Wall ${walls.length + 1}`,
+      profileId: profiles[0]?.id || "pbr36",
+      width: null,
+      height: null,
+      isGable: false,
+      ridgeHeight: null,
+      ridgeX: null,
+      leftEaveH: null,
+      rightEaveH: null,
+      panelCutHeight: null,
+      leftPanelCutHeight: null,
+      rightPanelCutHeight: null,
+      openings: [],
+      selectedVariationId: null,
+      selectedVariation: null,
+      computedPanels: null,
+      profileName: "",
+      profileCoverage: 0,
+    }]);
+  };
+
+  const updateWall = (id, updates) => {
+    setWalls(ws => ws.map(w => w.id === id ? { ...w, ...updates } : w));
+  };
+
+  const removeWall = (id) => setWalls(ws => ws.filter(w => w.id !== id));
+
+  const wallsWithData = walls.filter(w => w.selectedVariation && w.computedPanels);
+  const exportText = useMemo(() => generateExportText(wallsWithData, projectName), [wallsWithData, projectName]);
+
+  const copyExport = () => {
+    navigator.clipboard.writeText(exportText).then(() => {
+      setShowExport(true);
+      setTimeout(() => setShowExport(false), 2000);
+    });
+  };
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: colors.bg, color: colors.text,
+      fontFamily: "'Geist', 'SF Pro Display', -apple-system, sans-serif",
+    }}>
+      {/* Header */}
+      <div style={{
+        background: colors.surface, borderBottom: `1px solid ${colors.border}`,
+        padding: "16px 24px", display: "flex", justifyContent: "space-between", alignItems: "center",
+        position: "sticky", top: 0, zIndex: 100,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{
+            width: 34, height: 34, borderRadius: 8, background: `linear-gradient(135deg, ${colors.accent}, ${colors.accentDim})`,
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900, color: "#fff",
+          }}>M</div>
+          <div>
+            <input value={projectName} onChange={(e) => setProjectName(e.target.value)}
+              style={{ background: "transparent", border: "none", color: colors.text, fontSize: 16, fontWeight: 700, outline: "none", fontFamily: "inherit", padding: 0, width: 200 }} />
+            <div style={{ fontSize: 10, color: colors.textMuted, marginTop: 2, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              Metal Panel Layout Tool
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Button onClick={copyExport} variant={showExport ? "success" : "secondary"} size="sm" disabled={wallsWithData.length === 0}>
+            {showExport ? "Copied!" : "Copy Cut List"}
+          </Button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px" }}>
+        <TabBar
+          tabs={[
+            { id: "layout", label: "Wall Layout" },
+            { id: "cutlist", label: `Cut List (${wallsWithData.length})` },
+            { id: "profiles", label: "Profiles" },
+          ]}
+          active={activeTab}
+          onChange={setActiveTab}
+        />
+
+        <div style={{ marginTop: 20 }}>
+          {activeTab === "profiles" && (
+            <ProfileManager profiles={profiles} onChange={setProfiles} />
+          )}
+
+          {activeTab === "layout" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {walls.map(wall => (
+                <WallEditor
+                  key={wall.id}
+                  wall={wall}
+                  profiles={profiles}
+                  onUpdate={(updates) => updateWall(wall.id, updates)}
+                  onRemove={() => removeWall(wall.id)}
+                />
+              ))}
+              <Button onClick={addWall} variant="secondary" style={{ width: "100%", padding: "16px", justifyContent: "center" }}>
+                + Add Wall
+              </Button>
+            </div>
+          )}
+
+          {activeTab === "cutlist" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {wallsWithData.length === 0 ? (
+                <Card>
+                  <div style={{ textAlign: "center", color: colors.textMuted, padding: 40, fontSize: 13 }}>
+                    No walls configured yet. Add walls and select layouts to generate cut lists.
+                  </div>
+                </Card>
+              ) : (
+                <>
+                  <CutListDisplay walls={wallsWithData} />
+                  {/* Export preview */}
+                  <Card title="Export Preview (Plain Text)" headerRight={
+                    <Button onClick={copyExport} variant={showExport ? "success" : "primary"} size="sm">
+                      {showExport ? "Copied!" : "Copy to Clipboard"}
+                    </Button>
+                  }>
+                    <pre style={{
+                      fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 11, color: colors.textDim,
+                      background: colors.bg, padding: 16, borderRadius: 8, overflow: "auto",
+                      whiteSpace: "pre", lineHeight: 1.5, maxHeight: 400, border: `1px solid ${colors.border}`,
+                    }}>{exportText}</pre>
+                  </Card>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+    const App = MetalPanelLayoutApp;
+    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+  </script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(reg => console.log('SW registered:', reg.scope))
+          .catch(err => console.log('SW registration failed:', err));
+      });
+    }
+  </script>
+</body>
+</html>
