@@ -1,0 +1,528 @@
+══════════════════════════════════════════════════════════════════════
+METAL PANEL LAYOUT PWA — COMPLETE BUILD SPECIFICATION
+Personal-use field tool for R-Panel / PBR exposed fastener systems
+Revision: 1.0 · March 2026
+══════════════════════════════════════════════════════════════════════
+
+1. PURPOSE
+   ──────────────────────────────────────────────────────────────────────
+
+A single-user, offline-capable Progressive Web App that computes
+balanced panel layouts and generates installer-ready cut lists for
+exposed fastener metal panel systems (R-Panel, PBR, AG, or any
+user-defined profile). The app covers both wall siding and gable end
+wall configurations. It is a personal precision tool — no accounts,
+no sharing, no estimation, no Bluetooth. The math is the product.
+
+1. SCOPE
+   ──────────────────────────────────────────────────────────────────────
+
+IN SCOPE:
+· Configurable panel profiles (add / edit / delete)
+· Per-wall layout with up to 5 centering/layout variations
+· Full opening handling (windows, doors, OH doors, louvers)
+with notch cut calculations per panel
+· Gable end wall rake-angle cuts from roof pitch geometry
+· Dual-height model: Eave Height (structural) + Panel Cut Height
+(actual panel termination at underside of eave)
+· Single-piece gable panels (base trim to rake — not split at eave)
+· Visual canvas render of each wall layout
+· Wall-by-wall on-screen cut list
+· Exportable plain-text cut list (all walls, grouped per wall)
+· Fully offline — zero network dependency after first load
+
+OUT OF SCOPE:
+· Hip/valley angle calculations
+· Roof plane layouts (eave-to-ridge panel runs)
+· Bluetooth laser integration
+· Photo/LiDAR measurement
+· DXF/PDF import
+· Multi-user, cloud sync, accounts
+· Cost estimation or material ordering
+
+1. MEASUREMENT SYSTEM
+   ──────────────────────────────────────────────────────────────────────
+
+3.1 PRECISION
+
+All fractional measurements round to the nearest 1/8 of an inch.
+The valid fraction set is: 0, 1/8, 1/4, 3/8, 1/2, 5/8, 3/4, 7/8.
+
+Rounding rule: Math.round(value * 8) / 8
+This applies to ALL computed outputs: panel widths, gable cut
+heights, opening notch positions, cut deltas, and total-inches
+display values.
+
+3.2 INTERNAL REPRESENTATION
+
+All measurements are stored and computed as decimal inches (float).
+Conversion to imperial display format happens only at render time.
+
+3.3 DISPLAY FORMAT
+
+Format: Ft’ In” Frac (TotalIn” Frac)
+Examples:
+10’ 6” 1/4 (126” 1/4)
+0” (0”)
+3’ 0” (36”)
+2’ 11” 7/8 (35” 7/8)
+
+Rules:
+· Feet shown only when >= 1’
+· Whole inches always shown (even if 0)
+· Fraction shown only when non-zero
+· Total inches shown in parentheses with fraction if applicable
+
+3.4 INPUT PARSING
+
+The input parser accepts multiple notations and converts to
+decimal inches. All inputs are validated before use.
+
+Accepted formats and their parsed values:
+
+```
+"10-6-1/4"    → 10'  6" 1/4  = 126.25"
+"10' 6\" 1/4" → 10'  6" 1/4  = 126.25"
+"10' 6\""     → 10'  6"      = 126"
+"126.25"      → decimal       = 126.25"
+"10'"         → 10'  0"      = 120"
+"6\""         → 0'   6"      = 6"
+"6 1/4"       → 0'   6" 1/4  = 6.25"
+"6-1/4"       → 0'   6" 1/4  = 6.25"
+"1/4"         → 0'   0" 1/4  = 0.25"
+```
+
+Parse priority order:
+1. Pure decimal number
+2. Feet-inches-fraction (with ’, -, or space delimiters)
+3. Inches with fraction
+4. Standalone fraction
+5. Feet only (trailing ’)
+6. Inches only (trailing “)
+7. Null (invalid input)
+
+3.5 DECIMAL-TO-IMPERIAL CONVERSION ALGORITHM
+
+Input: decimalInches (float)
+
+Step 1: Separate sign. Work with absolute value.
+Step 2: ft = floor(abs / 12)
+Step 3: remainingInches = abs - (ft * 12)
+Step 4: wholeInches = floor(remainingInches)
+Step 5: fracPart = remainingInches - wholeInches
+Step 6: Find nearest fraction from FRACTIONS array:
+bestIdx = index of FRACTIONS[i] with minimum |fracPart - FRACTIONS[i]|
+Step 7: Overflow check: if bestIdx == 0 AND fracPart > (7/8 + 1/16),
+increment wholeInches, reset fraction to 0.
+Step 8: If wholeInches >= 12, increment ft, subtract 12.
+Step 9: Build display string per format rules above.
+Step 10: Build total-inches display:
+totalInches = Math.round(abs * 8) / 8
+Apply same fraction lookup to total.
+
+1. DATA MODEL
+   ──────────────────────────────────────────────────────────────────────
+
+4.1 PANEL PROFILE
+
+{
+id:            string    Unique identifier
+name:          string    Display name (e.g. “PBR / R-Panel 36"”)
+coverage:      float     Net coverage width in inches (e.g. 36)
+overallWidth:  float     Gross panel width including overlap (e.g. 37.75)
+ribSpacing:    float     Center-to-center rib spacing in inches
+ribHeight:     float     Rib height in inches
+}
+
+Default profiles shipped:
+PBR / R-Panel 36” : coverage=36, overall=37.75, rib=12” o.c., ribH=1.25”
+AG Panel 26”      : coverage=26, overall=27.5,  rib=2.67” o.c., ribH=0.5”
+
+Profiles are fully user-editable. Any coverage width is supported.
+
+4.2 WALL
+
+{
+id:                  int       Unique timestamp ID
+name:                string    User-assigned wall name
+profileId:           string    Reference to panel profile
+width:               float     Wall width (decimal inches)
+height:              float     Eave height — structural (decimal inches)
+panelCutHeight:      float     Panel cut height — base trim to underside
+of eave (decimal inches). Defaults to
+height if null.
+isGable:             bool      Whether this is a gable end wall
+ridgeHeight:         float     Ridge peak height (decimal inches, gable only)
+openings:            array     List of Opening objects
+selectedVariationId: string    Which layout variation is active
+selectedVariation:   object    Computed variation data (derived)
+computedPanels:      array     Final panel list with cuts (derived)
+profileName:         string    Cached profile name (derived)
+profileCoverage:     float     Cached coverage width (derived)
+}
+
+4.3 OPENING
+
+{
+id:         int       Unique timestamp ID
+type:       string    “window” | “door” | “ohd” | “louver” | “other”
+label:      string    User label (e.g. “W1”, “D2”, “OHD1”)
+fromLeft:   float     Distance from wall left edge to opening left edge
+fromBottom: float     Distance from wall bottom to opening bottom
+width:      float     Opening width
+height:     float     Opening height
+}
+
+4.4 COMPUTED PANEL (derived)
+
+{
+index:       int       Panel number (1-based, left to right)
+width:       float     Panel coverage width (full or partial)
+position:    string    “full” | “left-partial” | “right-partial”
+panelLength: float     Actual panel cut length (from base to top)
+gableCut:    object|null   Gable angle cut data (see 5.2)
+hasOpening:  bool      Whether panel intersects any opening
+cuts:        array     List of notch cuts for openings (see 5.3)
+}
+
+1. MATH ENGINE — CORE ALGORITHMS
+   ──────────────────────────────────────────────────────────────────────
+
+5.1 PANEL LAYOUT VARIATIONS
+
+Purpose: Given a wall width and panel coverage width, generate up
+to 5 layout options for the user to choose from.
+
+Three layout methods are computed:
+
+METHOD A — CENTERED (equal partials both sides)
+─────────────────────────────────────────────────
+fullCount = floor(wallWidth / panelCoverage)
+
+```
+Iterate fc from fullCount down to max(fullCount - 2, 1):
+  remainder = wallWidth - (fc * panelCoverage)
+  partial   = remainder / 2
+
+  If partial >= minPartialWidth (default 6") OR remainder == 0:
+    Build panel array:
+      [left-partial(partial)] + [full × fc] + [right-partial(partial)]
+      (skip partials if remainder == 0)
+
+    waste = remainder > 0 ? (panelCoverage - partial) * 2 : 0
+
+This produces up to 3 centered variations with different
+full-panel counts, giving the user control over partial width.
+
+Example:
+  Wall = 292", Panel = 36"
+  fc=8: remainder=4, partial=2 → SKIP (2 < 6 minimum)
+  fc=7: remainder=40, partial=20 → VALID: 20"|36"×7|20"
+  fc=6: remainder=76, partial=38 → VALID: 38"|36"×6|38"
+```
+
+METHOD B — LEFT FLUSH (full panels from left, cut on right)
+─────────────────────────────────────────────────────────────
+Iterate fc from fullCount down to max(fullCount - 1, 1):
+remainder = wallWidth - (fc * panelCoverage)
+
+```
+  If remainder > 0 AND remainder >= minPartialWidth:
+    Build: [full × fc] + [right-partial(remainder)]
+    waste = panelCoverage - remainder
+```
+
+METHOD C — RIGHT FLUSH (cut on left, full panels to right)
+─────────────────────────────────────────────────────────────
+Same as Method B but mirrored:
+Build: [left-partial(remainder)] + [full × fc]
+
+SORTING: Centered variations sort first, then all by ascending waste.
+OUTPUT: Truncated to max 5 variations.
+
+WASTE CALCULATION:
+wasteInches  = total material removed from partial panel sheets
+wastePercent = wasteInches / (totalPanels * panelCoverage) * 100
+
+MINIMUM PARTIAL WIDTH:
+Default 6”. If a centered partial falls below this, that variation
+is excluded. The user sees only viable layouts.
+
+5.2 GABLE END WALL ANGLE CUTS
+
+Purpose: Compute per-panel cut lengths and rake angle for a
+symmetrical gable triangle above the eave line.
+
+DUAL-HEIGHT MODEL:
+eaveHeight     = structural eave line (where roof slope starts)
+panelCutHeight = where panels actually terminate on sidewalls
+(base trim to underside of eave strut)
+ridgeHeight    = peak of the gable triangle
+
+```
+The difference (eaveHeight - panelCutHeight) is the "eave offset" —
+how far below the structural eave the panel physically stops.
+On gable ends, panels extend past panelCutHeight into the gable
+triangle, so the angle cut uses the full structural geometry.
+```
+
+GEOMETRY:
+The gable is a symmetric triangle:
+peakX = wallWidth / 2   (centerline)
+gableRise = ridgeHeight - eaveHeight
+eaveOffset = eaveHeight - panelCutHeight
+
+```
+Roof pitch = gableRise / (wallWidth / 2)
+Pitch notation = (pitch * 12) / 12   (e.g. "4/12")
+Rake angle = atan(pitch) × (180 / π)   in degrees
+```
+
+PER-PANEL CALCULATION:
+For each panel, compute left-edge X and right-edge X positions
+from cumulative panel widths:
+
+```
+  panelLeftX  = sum of all previous panel widths
+  panelRightX = panelLeftX + panel.width
+  panelCenterX = panelLeftX + panel.width / 2
+
+Structural heights at panel edges (the roof slope line):
+  structLeftH  = eaveHeight + gableRise × (1 - |panelLeftX - peakX| / peakX)
+  structRightH = eaveHeight + gableRise × (1 - |panelRightX - peakX| / peakX)
+
+This formula produces a V-shape: height increases linearly from
+eaveHeight at X=0 to ridgeHeight at X=peakX, then decreases
+linearly back to eaveHeight at X=wallWidth.
+
+Actual panel cut heights (applying eave offset):
+  leftCutH  = min(structLeftH - eaveOffset, structLeftH)
+  rightCutH = min(structRightH - eaveOffset, structRightH)
+
+Panel classification:
+  isAboveEave = (structLeftH > eaveHeight) OR (structRightH > eaveHeight)
+
+  If isAboveEave:
+    Panel gets an angle cut. Left and right cut heights are
+    rounded to nearest 1/8":
+      actualLeftH  = round(leftCutH × 8) / 8
+      actualRightH = round(rightCutH × 8) / 8
+    panelLength = max(actualLeftH, actualRightH)
+    gableCut = {
+      leftHeight:  actualLeftH
+      rightHeight: actualRightH
+      angle:       rakeAngle (degrees, 2 decimal places)
+      side:        "left" if panelCenterX <= peakX, else "right"
+      cutDelta:    |actualLeftH - actualRightH| rounded to 1/8"
+    }
+
+  If NOT isAboveEave:
+    Panel is flat-cut at panelCutHeight. No angle.
+    panelLength = panelCutHeight
+    gableCut = null
+```
+
+IMPORTANT — SINGLE-PIECE PANELS:
+Unlike the traditional two-piece gable method (split at eave line),
+this system uses single full-height panels from base trim to the
+underside of the rake. Every panel runs the full height in one
+piece. The angle cut is at the top of the panel only.
+
+5.3 OPENING NOTCH CUTS
+
+Purpose: For each panel, determine which openings it intersects
+and compute the notch dimensions relative to that panel.
+
+INTERSECTION TEST:
+For each panel, compute its X span [panelLeftX, panelRightX].
+An opening intersects if:
+(opening.fromLeft + opening.width) > panelLeftX
+AND opening.fromLeft < panelRightX
+
+NOTCH CALCULATION (per intersecting opening):
+cutFromLeft = max(0, opening.fromLeft - panelLeftX)
+cutWidth    = min(panel.width, openingRightX - panelLeftX) - cutFromLeft
+
+```
+Both values rounded to nearest 1/8".
+
+cutFromBottom = opening.fromBottom   (passthrough)
+cutHeight     = opening.height       (passthrough)
+fullWidth     = true if cutFromLeft <= 0.5 AND (panel.width - cutRight) <= 0.5
+                (indicates the opening spans nearly the full panel width)
+```
+
+OUTPUT per notch:
+{
+type:          opening type
+label:         opening label
+cutFromLeft:   distance from panel’s left edge to notch start
+cutWidth:      width of the notch in this panel
+cutFromBottom: height from panel bottom to notch bottom
+cutHeight:     notch height
+fullWidth:     boolean — notch spans full panel
+}
+
+A single panel can have multiple notch cuts if multiple openings
+overlap its X span.
+
+1. LAYOUT VARIATION SELECTION
+   ──────────────────────────────────────────────────────────────────────
+
+Each wall presents up to 5 layout variations. The user selects one.
+Only the selected variation is used for gable cuts, opening cuts,
+canvas rendering, and cut list generation.
+
+The computation pipeline per wall:
+
+1. Generate layout variations from wallWidth and profile coverage
+1. User selects a variation
+1. If gable: apply computeGableAngleCuts to selected panels
+   Else: set all panel lengths to panelCutHeight (or eaveHeight)
+1. If openings exist: apply computeOpeningCuts
+1. Result: final computedPanels array with all cut data
+1. VISUAL LAYOUT RENDERING
+   ──────────────────────────────────────────────────────────────────────
+
+Canvas-based (HTML5 <canvas>, 2x pixel ratio for retina).
+Auto-scales to container width with proportional height.
+
+Elements drawn:
+· Wall outline (rectangle, or gable triangle for gable walls)
+· Panel rectangles — blue fill for full panels, orange for partials
+· Panel index numbers at bottom of each panel
+· Partial panel width dimensions above cut panels
+· Opening rectangles — dark fill with dashed orange border and label
+· Dimension lines: total wall width (bottom), eave height (left)
+· If panelCutHeight differs from eaveHeight: green dashed line at
+panel cut height with label
+· If gable: ridge height label, gable triangle outline, angled
+panel tops following the rake slope
+
+Scaling:
+scaleX = drawableWidth / wallWidth
+scaleY = drawableHeight / maxHeight
+maxHeight = ridgeHeight (if gable) or wallHeight
+
+1. CUT LIST OUTPUT
+   ──────────────────────────────────────────────────────────────────────
+
+8.1 ON-SCREEN (per wall)
+
+Header:
+Wall name, width, eave height, panel cut height, eave offset,
+profile name, coverage width, selected layout variation name,
+gable info (if applicable): ridge height, pitch, rake angle.
+
+Table columns:
+#      Panel index number
+WIDTH  “FULL” or cut width in Ft’In”Frac (TotalIn”Frac) format
+LENGTH Panel length in same format
+NOTES  Concatenated flags:
+· “CUT to [width]” if partial panel
+· “Angle [deg]° [side]” if gable cut
+· “L:[leftH] R:[rightH]” if gable (left/right edge heights)
+· “Notch: [label] @ [fromLeft] from edge” per opening
+
+Footer:
+Total panels, sheets needed, waste inches and waste %.
+
+8.2 EXPORT (plain text, all walls)
+
+Formatted monospaced text with box-drawing characters.
+Grouped per wall with the same header/table/footer structure.
+Project summary at end: total panels and total sheets across
+all walls.
+
+Copied to clipboard via navigator.clipboard.writeText().
+
+1. UI STRUCTURE
+   ──────────────────────────────────────────────────────────────────────
+
+Three tabs:
+
+WALL LAYOUT — Primary workspace
+· Add Wall button
+· Per wall card:
+- Wall name (editable)
+- Panel profile selector
+- Wall Width input
+- Eave Height input
+- Panel Cut Height input (defaults to eave if blank)
+- Gable toggle with Ridge Height input
+- Openings editor (add/remove, type/label/position/size)
+- Layout variations list (clickable, up to 5)
+- Canvas preview of selected layout
+· Remove Wall button per wall
+
+CUT LIST — Read-only view
+· Wall-by-wall cut list cards
+· Export preview (monospaced pre block)
+· Copy to Clipboard button
+
+PROFILES — Configuration
+· List all profiles with edit/delete
+· Add Profile button
+· Inline editor: name, coverage, overall width, rib spacing, rib height
+
+1. TECHNICAL STACK
+   ──────────────────────────────────────────────────────────────────────
+
+Framework:     React (functional components + hooks)
+Rendering:     HTML5 Canvas (native, no library dependency)
+State:         React useState (all in-memory, no persistence)
+Styling:       Inline styles with centralized color constants
+Offline:       PWA service worker (Workbox recommended for production)
+Export:        Clipboard API (navigator.clipboard.writeText)
+Bundle target: Single .jsx file, ~1000 lines
+External deps: None (zero npm dependencies in current build)
+
+1. COLOR SYSTEM
+   ──────────────────────────────────────────────────────────────────────
+
+Background:     #0F1117
+Surface:        #1A1D27
+Surface Alt:    #232734
+Border:         #2E3345
+Accent:         #5B8AF0 (selection, active states, gable info)
+Warning:        #E8943A (openings, cut notes, waste indicators)
+Error:          #E05252 (invalid input, remove actions)
+Success:        #4ADE80 (zero waste, panel cut height line)
+Text:           #E8ECF4
+Text Dim:       #8B92A8
+Text Muted:     #5A6178
+Panel Full:     #2A4A8C fill, #4470CC border
+Panel Cut:      #8C4A2A fill, #CC7044 border
+Opening:        #1A1D27 fill, #E8943A dashed border
+
+1. KNOWN CONSTRAINTS & FUTURE CONSIDERATIONS
+   ──────────────────────────────────────────────────────────────────────
+
+· No persistent storage — refreshing the page clears all data.
+Future: IndexedDB via Dexie.js for project save/load.
+
+· Canvas is non-interactive — view only, no drag/zoom.
+Future: Konva.js for pinch-zoom, pan, tap-to-select panels.
+
+· Openings assume rectangular cutouts in full-height panels.
+No L-shaped or U-shaped notch output (just position + size).
+
+· Gable geometry assumes symmetric triangle (equal slopes both sides).
+Asymmetric gables (different eave heights per side) not supported.
+
+· Minimum partial width is hardcoded at 6”.
+Future: Make configurable per profile.
+
+· Export is plain text only.
+Future: PDF with rendered canvas layout diagram.
+
+· No wainscot line support yet.
+Future: Horizontal split line dividing upper/lower panel zones.
+
+· Roof plane panel runs (eave-to-ridge) not implemented.
+Only gable END WALLS are handled; actual roof surface layout
+is out of scope.
+
+══════════════════════════════════════════════════════════════════════
+END OF SPECIFICATION
+══════════════════════════════════════════════════════════════════════
