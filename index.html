@@ -345,35 +345,162 @@ const colors = {
 
 // ─── COMPONENTS ─────────────────────────────────────────────────────────────
 
+// ─── CUSTOM NUMPAD CONTEXT ──────────────────────────────────────────────────
+// Global state for which input has the numpad open.
+// We use a simple pub/sub so the overlay and inputs stay in sync.
+const numpadState = { activeId: null, listeners: new Set() };
+function setNumpadActive(id) { numpadState.activeId = id; numpadState.listeners.forEach(fn => fn(id)); }
+function useNumpadActive() {
+  const [id, setId] = useState(numpadState.activeId);
+  useEffect(() => { numpadState.listeners.add(setId); return () => numpadState.listeners.delete(setId); }, []);
+  return id;
+}
+
+// ─── NUMPAD OVERLAY ─────────────────────────────────────────────────────────
+function NumpadOverlay() {
+  const activeId = useNumpadActive();
+  const [buffer, setBuffer] = useState("");
+  const lastActiveRef = useRef(null);
+
+  useEffect(() => {
+    if (activeId && activeId !== lastActiveRef.current) {
+      // When switching to a new input, load its current value into the buffer
+      const el = document.getElementById(activeId);
+      if (el) setBuffer(el.getAttribute("data-raw") || "");
+      lastActiveRef.current = activeId;
+    }
+  }, [activeId]);
+
+  if (!activeId) return null;
+
+  const dispatch = (val) => {
+    const el = document.getElementById(activeId);
+    if (!el) return;
+    // Dispatch a custom event with the updated buffer
+    const newBuf = val === null ? "" : val;
+    setBuffer(newBuf);
+    el.dispatchEvent(new CustomEvent("numpad-input", { detail: { value: newBuf } }));
+  };
+
+  const press = (key) => {
+    if (key === "BS") {
+      const newBuf = buffer.slice(0, -1);
+      dispatch(newBuf);
+    } else if (key === "CLR") {
+      dispatch("");
+    } else if (key === "ENTER") {
+      setNumpadActive(null);
+      lastActiveRef.current = null;
+    } else {
+      const newBuf = buffer + key;
+      dispatch(newBuf);
+    }
+  };
+
+  const parsed = parseImperialInput(buffer);
+  const imperial = parsed != null ? decToImperial(parsed) : null;
+
+  const btnStyle = (special) => ({
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: special === "enter" ? colors.accent : special === "fn" ? colors.surfaceAlt : "#1A2035",
+    border: `1px solid ${special === "enter" ? colors.accentDim : "#2A3050"}`,
+    borderRadius: 10, color: special === "enter" ? "#fff" : colors.text,
+    fontSize: special === "fn" ? 20 : 26, fontWeight: 600,
+    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+    cursor: "pointer", userSelect: "none", WebkitTapHighlightColor: "transparent",
+    minHeight: 56, transition: "background 0.1s",
+  });
+
+  return (
+    <div style={{
+      position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 9999,
+      background: colors.bg, borderTop: `1px solid ${colors.border}`,
+      padding: "8px 8px env(safe-area-inset-bottom, 8px)",
+    }}>
+      {/* Display bar */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        padding: "8px 14px", marginBottom: 6, background: colors.surface,
+        borderRadius: 8, border: `1px solid ${colors.border}`,
+      }}>
+        <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 18, color: colors.text, minHeight: 24, letterSpacing: "0.05em" }}>
+          {buffer || <span style={{ color: colors.textMuted }}>—</span>}
+        </div>
+        <div style={{ fontSize: 12, color: imperial ? colors.accent : colors.textMuted, fontFamily: "monospace" }}>
+          {imperial ? imperial.displayWithTotal : buffer ? "..." : ""}
+        </div>
+      </div>
+      {/* Numpad grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5 }}>
+        {["1","2","3","4","5","6","7","8","9"].map(k => (
+          <div key={k} style={btnStyle()} onClick={() => press(k)} onTouchStart={(e) => { e.currentTarget.style.background = "#2A3A60"; }} onTouchEnd={(e) => { e.currentTarget.style.background = "#1A2035"; }}>{k}</div>
+        ))}
+        <div style={btnStyle("fn")} onClick={() => press("'")}>{'  \u2032  '}</div>
+        <div style={btnStyle()} onClick={() => press("0")}>0</div>
+        <div style={btnStyle("fn")} onClick={() => press('"')}>{' \u2033 '}</div>
+      </div>
+      {/* Bottom row: /, ., backspace, enter */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 5, marginTop: 5 }}>
+        <div style={btnStyle("fn")} onClick={() => press("/")}>/</div>
+        <div style={btnStyle("fn")} onClick={() => press(".")}>.</div>
+        <div style={btnStyle("fn")} onClick={() => press("BS")}>⌫</div>
+        <div style={btnStyle("enter")} onClick={() => press("ENTER")}>↵</div>
+      </div>
+    </div>
+  );
+}
+
 function MeasurementInput({ value, onChange, label, placeholder = "e.g. 10-6-1/4", compact = false }) {
   const [raw, setRaw] = useState(value != null ? String(value) : "");
   const [valid, setValid] = useState(true);
-  const handleChange = (e) => {
-    const v = e.target.value;
+  const inputId = useRef("mi-" + Math.random().toString(36).slice(2, 9)).current;
+  const activeId = useNumpadActive();
+  const isActive = activeId === inputId;
+
+  const processValue = useCallback((v) => {
     setRaw(v);
     const parsed = parseImperialInput(v);
     if (parsed !== null) { setValid(true); onChange(parsed); }
     else if (v === "") { setValid(true); onChange(null); }
     else setValid(false);
+  }, [onChange]);
+
+  // Listen for numpad events
+  useEffect(() => {
+    const el = document.getElementById(inputId);
+    if (!el) return;
+    const handler = (e) => processValue(e.detail.value);
+    el.addEventListener("numpad-input", handler);
+    return () => el.removeEventListener("numpad-input", handler);
+  }, [inputId, processValue]);
+
+  const handleTap = () => {
+    setNumpadActive(inputId);
   };
+
   const parsed = parseImperialInput(raw);
   const imperial = parsed != null ? decToImperial(parsed) : null;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: compact ? "1" : undefined }}>
       {label && <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>{label}</label>}
-      <input
-        value={raw}
-        onChange={handleChange}
-        placeholder={placeholder}
+      <div
+        id={inputId}
+        data-raw={raw}
+        onClick={handleTap}
         style={{
-          background: colors.surfaceAlt, border: `1px solid ${valid ? colors.border : colors.error}`, borderRadius: 6,
-          color: colors.text, padding: compact ? "8px 10px" : "10px 12px", fontSize: 14, fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-          outline: "none", width: "100%", boxSizing: "border-box", transition: "border-color 0.2s",
+          background: colors.surfaceAlt,
+          border: `1px solid ${isActive ? colors.borderFocus : (valid ? colors.border : colors.error)}`,
+          borderRadius: 6, color: raw ? colors.text : colors.textMuted,
+          padding: compact ? "8px 10px" : "10px 12px", fontSize: 14,
+          fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+          width: "100%", boxSizing: "border-box", transition: "border-color 0.2s",
+          cursor: "pointer", userSelect: "none", minHeight: compact ? 36 : 42,
         }}
-        onFocus={(e) => e.target.style.borderColor = colors.borderFocus}
-        onBlur={(e) => e.target.style.borderColor = valid ? colors.border : colors.error}
-      />
-      {imperial && (
+      >
+        {raw || placeholder}
+      </div>
+      {imperial && !isActive && (
         <span style={{ fontSize: 11, color: colors.accent, fontFamily: "monospace" }}>{imperial.displayWithTotal}</span>
       )}
     </div>
@@ -659,6 +786,39 @@ function OpeningEditor({ openings, onChange, wallWidth, wallHeight }) {
   );
 }
 
+// ─── SHARED: Per-panel row data used by both display and export ─────────────
+function buildPanelRow(p, wall) {
+  const isCut = p.position !== "full";
+  const hasGable = !!p.gableCut;
+  const lH = hasGable ? p.gableCut.leftHeight : (p.panelLength || wall.panelCutHeight || wall.height);
+  const rH = hasGable ? p.gableCut.rightHeight : lH;
+  const isAngle = hasGable && lH !== rH;
+  const notes = [];
+  if (isCut) notes.push(`CUT W: ${decToImperial(p.width).display}`);
+  if (hasGable && p.gableCut.straddlesRidge) {
+    notes.push(`RIDGE · L ${p.gableCut.leftAngle}° · R ${p.gableCut.rightAngle}°`);
+  } else if (isAngle) {
+    notes.push(`${p.gableCut.angle}° ${p.gableCut.side} slope`);
+  }
+  if (p.hasOpening && p.cuts) {
+    p.cuts.forEach(c => notes.push(`Notch: ${c.label}`));
+  }
+  if (!isCut && !isAngle && notes.length === 0) notes.push("full panel");
+  return {
+    num: String(p.index).padStart(2, "0"),
+    lH,
+    rH,
+    lDisplay: decToImperial(lH).display,
+    lTotal: `${Math.round(lH * 8) / 8}"`,
+    rDisplay: decToImperial(rH).display,
+    rTotal: `${Math.round(rH * 8) / 8}"`,
+    arrow: isAngle ? "→" : "—",
+    isAngle,
+    isCut,
+    notes: notes.join(" · "),
+  };
+}
+
 // ─── CUT LIST DISPLAY ───────────────────────────────────────────────────────
 function CutListDisplay({ walls }) {
   if (!walls || walls.length === 0) return null;
@@ -668,8 +828,9 @@ function CutListDisplay({ walls }) {
         if (!wall.selectedVariation || !wall.computedPanels) return null;
         return (
           <Card key={wi} title={`${wall.name} — Cut List`} style={{ background: colors.bg }}>
-            <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12, color: colors.text, lineHeight: 1.8 }}>
-              <div style={{ color: colors.textDim, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${colors.border}` }}>
+            <div style={{ fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12, color: colors.text }}>
+              {/* Wall header info */}
+              <div style={{ color: colors.textDim, marginBottom: 12, paddingBottom: 10, borderBottom: `1px solid ${colors.border}`, lineHeight: 1.8, fontSize: 11 }}>
                 <div>Wall: {decToImperial(wall.width).displayWithTotal} wide × {decToImperial(wall.height).displayWithTotal} eave height</div>
                 <div>Panel Cut Height: {decToImperial(wall.panelCutHeight || wall.height).displayWithTotal}{wall.panelCutHeight && wall.panelCutHeight !== wall.height ? ` (${decToImperial(wall.height - wall.panelCutHeight).display} below eave)` : ""}</div>
                 <div>Profile: {wall.profileName} · Coverage: {decToImperial(wall.profileCoverage).display}</div>
@@ -684,45 +845,54 @@ function CutListDisplay({ walls }) {
                   </div>
                 )}
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 1fr 1fr", gap: "4px 12px", fontSize: 11 }}>
-                <div style={{ color: colors.textMuted, fontWeight: 700 }}>#</div>
-                <div style={{ color: colors.textMuted, fontWeight: 700 }}>WIDTH</div>
-                <div style={{ color: colors.textMuted, fontWeight: 700 }}>LENGTH</div>
-                <div style={{ color: colors.textMuted, fontWeight: 700 }}>NOTES</div>
+              {/* Panel table */}
+              <div style={{ overflowX: "auto" }}>
                 {wall.computedPanels.map((p, pi) => {
-                  const isCut = p.position !== "full";
-                  const notes = [];
-                  if (isCut) notes.push(`CUT to ${decToImperial(p.width).display}`);
-                  if (p.gableCut) {
-                    if (p.gableCut.straddlesRidge) {
-                      notes.push(`RIDGE PANEL · L angle ${p.gableCut.leftAngle}° · R angle ${p.gableCut.rightAngle}°`);
-                    } else {
-                      notes.push(`Angle ${p.gableCut.angle}° ${p.gableCut.side}`);
-                    }
-                    notes.push(`L:${decToImperial(p.gableCut.leftHeight).display} R:${decToImperial(p.gableCut.rightHeight).display}`);
-                  }
-                  if (p.hasOpening && p.cuts) {
-                    p.cuts.forEach(c => notes.push(`Notch: ${c.label} @ ${decToImperial(c.cutFromLeft).display} from edge`));
-                  }
+                  const row = buildPanelRow(p, wall);
                   return (
-                    <React.Fragment key={pi}>
-                      <div style={{ color: colors.textDim }}>{p.index}</div>
-                      <div style={{ color: isCut ? colors.panelCutBorder : colors.text }}>
-                        {isCut ? decToImperial(p.width).displayWithTotal : "FULL"}
+                    <div key={pi} style={{
+                      display: "flex", alignItems: "center", gap: 0,
+                      padding: "8px 0", borderBottom: `1px solid ${colors.border}`,
+                      background: pi % 2 === 0 ? "transparent" : "rgba(255,255,255,0.02)",
+                    }}>
+                      {/* Panel number */}
+                      <div style={{ width: 36, flexShrink: 0, fontSize: 13, fontWeight: 700, color: colors.textDim, textAlign: "center" }}>
+                        {row.num}
                       </div>
-                      <div style={{ color: p.gableCut ? colors.accent : colors.text }}>
-                        {decToImperial(p.panelLength || wall.height).displayWithTotal}
+                      {/* Left Height */}
+                      <div style={{ flex: 1, paddingLeft: 4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: colors.text }}>
+                          {row.lDisplay}
+                        </div>
+                        <div style={{ fontSize: 10, color: colors.textDim }}>
+                          ({row.lTotal})
+                        </div>
                       </div>
-                      <div style={{ color: notes.length > 0 ? colors.warn : colors.textMuted, fontSize: 10 }}>
-                        {notes.length > 0 ? notes.join(" · ") : "—"}
+                      {/* Arrow */}
+                      <div style={{ width: 30, textAlign: "center", fontSize: 14, color: row.isAngle ? colors.warn : colors.textMuted, flexShrink: 0 }}>
+                        {row.arrow}
                       </div>
-                    </React.Fragment>
+                      {/* Right Height */}
+                      <div style={{ flex: 1, paddingLeft: 4 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: row.isAngle ? colors.warn : colors.text }}>
+                          {row.rDisplay}
+                        </div>
+                        <div style={{ fontSize: 10, color: colors.textDim }}>
+                          ({row.rTotal})
+                        </div>
+                      </div>
+                      {/* Notes */}
+                      <div style={{ flex: 1.2, paddingLeft: 8, fontSize: 10, color: row.notes !== "full panel" ? colors.warn : colors.textMuted, lineHeight: 1.5 }}>
+                        {row.notes}
+                      </div>
+                    </div>
                   );
                 })}
               </div>
-              <div style={{ marginTop: 12, paddingTop: 8, borderTop: `1px solid ${colors.border}`, color: colors.textDim, fontSize: 11 }}>
-                Total panels: {wall.computedPanels.length} · Full sheets needed: {wall.selectedVariation.sheetsNeeded} ·
-                Waste: {decToImperial(wall.selectedVariation.wasteInches).display} ({wall.selectedVariation.wastePercent.toFixed(1)}%)
+              {/* Footer summary */}
+              <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${colors.border}`, color: colors.textDim, fontSize: 11, lineHeight: 1.8 }}>
+                <div>Total panels: {wall.computedPanels.length} · Full sheets needed: {wall.selectedVariation.sheetsNeeded}</div>
+                <div>Waste: {decToImperial(wall.selectedVariation.wasteInches).display} ({wall.selectedVariation.wastePercent.toFixed(1)}%)</div>
               </div>
             </div>
           </Card>
@@ -761,23 +931,13 @@ function generateExportText(walls, projectName) {
       }
     }
     text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    text += `  #   WIDTH              LENGTH             NOTES\n`;
-    text += `  ─── ────────────────── ────────────────── ──────────────────\n`;
+    text += `  #   LEFT HEIGHT         →  RIGHT HEIGHT        NOTES\n`;
+    text += `  ─── ─────────────────── ── ─────────────────── ──────────────────\n`;
     wall.computedPanels.forEach(p => {
-      const isCut = p.position !== "full";
-      const w = isCut ? decToImperial(p.width).displayWithTotal.padEnd(18) : "FULL".padEnd(18);
-      const l = decToImperial(p.panelLength || wall.height).displayWithTotal.padEnd(18);
-      const notes = [];
-      if (isCut) notes.push(`CUT`);
-      if (p.gableCut) {
-        if (p.gableCut.straddlesRidge) {
-          notes.push(`RIDGE | L:${p.gableCut.leftAngle}° R:${p.gableCut.rightAngle}° | L:${decToImperial(p.gableCut.leftHeight).display} R:${decToImperial(p.gableCut.rightHeight).display}`);
-        } else {
-          notes.push(`${p.gableCut.angle}° ${p.gableCut.side} | L:${decToImperial(p.gableCut.leftHeight).display} R:${decToImperial(p.gableCut.rightHeight).display}`);
-        }
-      }
-      if (p.hasOpening && p.cuts) p.cuts.forEach(c => notes.push(`Notch:${c.label}`));
-      text += `  ${String(p.index).padEnd(3)} ${w} ${l} ${notes.join(" · ")}\n`;
+      const row = buildPanelRow(p, wall);
+      const lStr = `${row.lDisplay} (${row.lTotal})`.padEnd(19);
+      const rStr = `${row.rDisplay} (${row.rTotal})`.padEnd(19);
+      text += `  ${row.num}  ${lStr}${row.arrow}  ${rStr}${row.notes}\n`;
     });
     text += `\n  Panels: ${wall.computedPanels.length} · Sheets: ${wall.selectedVariation.sheetsNeeded} · Waste: ${decToImperial(wall.selectedVariation.wasteInches).display} (${wall.selectedVariation.wastePercent.toFixed(1)}%)\n\n`;
   });
@@ -838,7 +998,7 @@ function WallEditor({ wall, profiles, onUpdate, onRemove }) {
         panelCutHeight: wall.panelCutHeight,
       });
     }
-  }, [selectedVar?.id, computedPanels.length]);
+  }, [selectedVar, computedPanels]);
 
   return (
     <Card title={wall.name} headerRight={<Button onClick={onRemove} variant="danger" size="sm">Remove Wall</Button>}>
@@ -974,7 +1134,7 @@ function WallEditor({ wall, profiles, onUpdate, onRemove }) {
           )}
         </div>
         {/* Layout Variations */}
-        {wall.width > 0 && wall.height > 0 && variations.length > 0 && (
+        {wall.width && wall.height && variations.length > 0 && (
           <div>
             <label style={{ fontSize: 11, color: colors.textDim, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", marginBottom: 8, display: "block" }}>
               Layout Variations (select one)
@@ -1179,7 +1339,7 @@ export default function MetalPanelLayoutApp() {
           onChange={setActiveTab}
         />
 
-        <div style={{ marginTop: 20 }}>
+        <div style={{ marginTop: 20, paddingBottom: 320 }}>
           {activeTab === "profiles" && (
             <ProfileManager profiles={profiles} onChange={setProfiles} />
           )}
@@ -1230,6 +1390,7 @@ export default function MetalPanelLayoutApp() {
           )}
         </div>
       </div>
+      <NumpadOverlay />
     </div>
   );
 }
