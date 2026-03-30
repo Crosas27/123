@@ -865,7 +865,7 @@ function CutListDisplay({ walls }) {
                           {row.lDisplay}
                         </div>
                         <div style={{ fontSize: 10, color: colors.textDim }}>
-                          ({row.lTotal})
+                          {row.lTotal}
                         </div>
                       </div>
                       {/* Arrow */}
@@ -878,7 +878,7 @@ function CutListDisplay({ walls }) {
                           {row.rDisplay}
                         </div>
                         <div style={{ fontSize: 10, color: colors.textDim }}>
-                          ({row.rTotal})
+                          {row.rTotal}
                         </div>
                       </div>
                       {/* Notes */}
@@ -1248,6 +1248,7 @@ function ProfileManager({ profiles, onChange }) {
   );
 }
 
+
 // ─── MAIN APP ───────────────────────────────────────────────────────────────
 export default function MetalPanelLayoutApp() {
   const [profiles, setProfiles] = useState(DEFAULT_PROFILES);
@@ -1331,7 +1332,7 @@ export default function MetalPanelLayoutApp() {
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px 16px" }}>
         <TabBar
           tabs={[
-            { id: "layout", label: "Wall Layout" },
+            { id: "layout", label: "Layout" },
             { id: "cutlist", label: `Cut List (${wallsWithData.length})` },
             { id: "profiles", label: "Profiles" },
           ]}
