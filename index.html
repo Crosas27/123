@@ -30,100 +30,154 @@
     const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ─── UTILITY: Imperial Measurement System ───────────────────────────────────
-const FRACTIONS = [0, 1/8, 1/4, 3/8, 1/2, 5/8, 3/4, 7/8];
-const FRAC_LABELS = ["", "1/8", "1/4", "3/8", "1/2", "5/8", "3/4", "7/8"];
+// Formatter adopted from Layout_CR27's formatter.js — map-based fraction lookup.
+// Parser adopted from Layout_CR27's MeasurementParser.js — curly-quote normalization,
+// two-phase architecture. Keeps null-return for unparseable input.
+
+const FRAC_MAP = { "0.125": "1/8", "0.250": "1/4", "0.375": "3/8", "0.500": "1/2", "0.625": "5/8", "0.750": "3/4", "0.875": "7/8" };
+
+function getFraction(decimal) {
+  return FRAC_MAP[Number(decimal.toFixed(3)).toFixed(3)] || "";
+}
+
+function roundToEighth(v) { return Math.round(v * 8) / 8; }
+
+function formatFeetInches(inches) {
+  const rounded = roundToEighth(inches);
+  const neg = rounded < 0;
+  const abs = Math.abs(rounded);
+  const feet = Math.floor(abs / 12);
+  const remainder = abs % 12;
+  const whole = Math.floor(remainder);
+  const frac = getFraction(remainder - whole);
+  const sign = neg ? "-" : "";
+  if (feet === 0) {
+    if (whole === 0 && !frac) return `${sign}0"`;
+    if (frac && whole > 0) return `${sign}${whole}" ${frac}`;
+    if (frac) return `${sign}${frac}"`;
+    return `${sign}${whole}"`;
+  }
+  if (whole === 0 && !frac) return `${sign}${feet}'`;
+  if (frac && whole > 0) return `${sign}${feet}' ${whole}" ${frac}`;
+  if (frac) return `${sign}${feet}' ${frac}"`;
+  return `${sign}${feet}' ${whole}"`;
+}
+
+function formatTotal(inches) {
+  const rounded = roundToEighth(Math.abs(inches));
+  const whole = Math.floor(rounded);
+  const frac = getFraction(rounded - whole);
+  const sign = inches < 0 ? "-" : "";
+  if (frac && whole > 0) return `${sign}${whole}" ${frac}`;
+  if (frac) return `${sign}${frac}"`;
+  return `${sign}${whole}"`;
+}
 
 function decToImperial(decimalInches) {
   if (decimalInches == null || isNaN(decimalInches)) return { ft: 0, inch: 0, fracIdx: 0, display: '0"', displayWithTotal: '0" (0")' };
-  const neg = decimalInches < 0;
-  const abs = Math.abs(decimalInches);
+  const rounded = roundToEighth(decimalInches);
+  const abs = Math.abs(rounded);
   const ft = Math.floor(abs / 12);
-  const remainInches = abs - ft * 12;
-  const wholeInch = Math.floor(remainInches);
-  const fracPart = remainInches - wholeInch;
-  let bestIdx = 0, bestDiff = 999;
-  for (let i = 0; i < FRACTIONS.length; i++) {
-    const d = Math.abs(fracPart - FRACTIONS[i]);
-    if (d < bestDiff) { bestDiff = d; bestIdx = i; }
+  const remainder = abs % 12;
+  const inch = Math.floor(remainder);
+  const fracDecimal = remainder - inch;
+  const fracStr = getFraction(fracDecimal);
+  const fracIdx = fracStr ? Math.round(fracDecimal * 8) : 0;
+  const display = formatFeetInches(decimalInches);
+  const total = formatTotal(decimalInches);
+  return { ft, inch, fracIdx, display, displayWithTotal: `${display} (${total})` };
+}
+
+function parseInchPortion(text) {
+  const cleaned = text.trim();
+  if (!cleaned) return null;
+  if (/^-?\d+(\.\d+)?$/.test(cleaned)) return Number(cleaned) || 0;
+  const wholeFrac = cleaned.match(/^(-?\d+)[\s\-]+(\d+)\/(\d+)$/);
+  if (wholeFrac) return (Number(wholeFrac[1]) || 0) + (Number(wholeFrac[2]) || 0) / (Number(wholeFrac[3]) || 1);
+  const fracOnly = cleaned.match(/^(-?\d+)\/(\d+)$/);
+  if (fracOnly) return (Number(fracOnly[1]) || 0) / (Number(fracOnly[2]) || 1);
+  const parts = cleaned.split(/\s+/);
+  if (parts.length === 2 && parts[1] && parts[1].includes("/")) {
+    const whole = Number(parts[0]) || 0;
+    const fp = parseInchPortion(parts[1]);
+    if (fp !== null) return whole + fp;
   }
-  let finalInch = wholeInch, finalFrac = bestIdx, finalFt = ft;
-  if (bestIdx === 0 && fracPart > 7/8 + 1/16) { finalInch++; finalFrac = 0; }
-  if (finalInch >= 12) { finalFt++; finalInch -= 12; }
-  const sign = neg ? "-" : "";
-  let display = sign;
-  if (finalFt > 0) display += `${finalFt}' `;
-  display += `${finalInch}"`;
-  if (finalFrac > 0) display += ` ${FRAC_LABELS[finalFrac]}`;
-  const totalInches = Math.round(abs * 8) / 8;
-  const totalWhole = Math.floor(totalInches);
-  const totalFracPart = totalInches - totalWhole;
-  let totalFracIdx = 0; let tbd = 999;
-  for (let i = 0; i < FRACTIONS.length; i++) { const d = Math.abs(totalFracPart - FRACTIONS[i]); if (d < tbd) { tbd = d; totalFracIdx = i; } }
-  let totalDisplay = `${totalWhole}"`;
-  if (totalFracIdx > 0) totalDisplay += ` ${FRAC_LABELS[totalFracIdx]}`;
-  return { ft: finalFt, inch: finalInch, fracIdx: finalFrac, display: display.trim(), displayWithTotal: `${display.trim()} (${sign}${totalDisplay})` };
+  const num = Number(cleaned);
+  return isNaN(num) ? null : num;
 }
 
 function parseImperialInput(str) {
   if (!str || str.trim() === "") return null;
-  str = str.trim().replace(/\s+/g, " ");
-  // Try decimal number first
-  if (/^\d+(\.\d+)?$/.test(str)) return parseFloat(str);
-  // Try feet-inches-fraction: 10-6-1/4 or 10'6"1/4 or 10' 6" 1/4
-  let m = str.match(/^(\d+)['\-\s]+(\d+)(?:["\-\s]+(\d+\/\d+))?["\s]*$/);
-  if (m) {
-    let val = parseInt(m[1]) * 12 + parseInt(m[2]);
-    if (m[3]) { const [n, d] = m[3].split("/").map(Number); val += n / d; }
-    return val;
+  // Normalize curly/smart quotes (from Layout_CR27)
+  const text = str.replace(/[\u2032\u2018\u2019\u0060]/g, "'").replace(/[\u2033\u201C\u201D]/g, '"').replace(/\s+/g, " ").trim();
+  if (/^-?\d+(\.\d+)?$/.test(text)) return Number(text) || 0;
+  let feet = 0, inches = 0;
+  const feetMatch = text.match(/(-?\d+(?:\.\d+)?)\s*'/);
+  if (feetMatch) feet = Number(feetMatch[1]) || 0;
+  let inchText;
+  if (feetMatch) {
+    const fi = text.indexOf("'");
+    inchText = text.slice(fi + 1).replace(/"/g, "").trim();
+  } else {
+    inchText = text.replace(/"/g, "").trim();
   }
-  // Try just inches with fraction: 6 1/4 or 6-1/4
-  m = str.match(/^(\d+)[\-\s]+(\d+\/\d+)["\s]*$/);
-  if (m) { const [n, d] = m[2].split("/").map(Number); return parseInt(m[1]) + n / d; }
-  // Try just fraction
-  m = str.match(/^(\d+)\/(\d+)$/);
-  if (m) return parseInt(m[1]) / parseInt(m[2]);
-  // Try feet only: 10'
-  m = str.match(/^(\d+)'$/);
-  if (m) return parseInt(m[1]) * 12;
-  // Try inches only: 6"
-  m = str.match(/^(\d+)"$/);
-  if (m) return parseInt(m[1]);
-  return null;
+  if (inchText) {
+    const parsed = parseInchPortion(inchText);
+    if (parsed === null && !feetMatch) return null;
+    inches = parsed ?? 0;
+  }
+  const result = feet * 12 + inches;
+  return result === 0 && text !== "0" && !feetMatch ? null : result;
 }
 
 // ─── MATH ENGINE: Panel Layout Calculations ─────────────────────────────────
 function generateLayoutVariations(wallWidth, panelCoverage, minPartialWidth = 6) {
   const variations = [];
-  // Method 1: Centered — equal partials both sides
   const fullCount = Math.floor(wallWidth / panelCoverage);
-  for (let fc = fullCount; fc >= Math.max(fullCount - 2, 1); fc--) {
+  // Max partial panels allowed to iterate down
+  const maxDropCentered = 3;
+  const maxDropFlush = 2;
+
+  // Method 1: Centered — equal partials both sides
+  for (let fc = fullCount; fc >= Math.max(fullCount - maxDropCentered, 1); fc--) {
     const remainder = wallWidth - fc * panelCoverage;
+    if (remainder < 0) continue;
     const partial = remainder / 2;
-    if (partial >= minPartialWidth || remainder === 0) {
+    // STRICT: partial must be >= 6" and CANNOT exceed panel coverage width
+    if (remainder === 0) {
+      // Perfect fit
       const panels = [];
-      if (remainder > 0) panels.push({ width: partial, position: "left-partial", index: 1 });
+      for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: i + 1 });
+      variations.push({
+        id: `centered-${fc}`, name: `Centered · ${fc} full · no cuts`,
+        description: "Perfect fit — no partial panels needed", method: "centered",
+        panels, fullPanels: fc, partialWidth: 0, totalPanels: fc, sheetsNeeded: fc,
+        wasteInches: 0, wastePercent: 0,
+      });
+    } else if (partial >= minPartialWidth && partial <= panelCoverage) {
+      const panels = [];
+      panels.push({ width: partial, position: "left-partial", index: 1 });
       for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: panels.length + 1 });
-      if (remainder > 0) panels.push({ width: partial, position: "right-partial", index: panels.length + 1 });
-      const waste = remainder > 0 ? (panelCoverage - partial) * 2 : 0;
+      panels.push({ width: partial, position: "right-partial", index: panels.length + 1 });
+      const waste = (panelCoverage - partial) * 2;
       variations.push({
         id: `centered-${fc}`,
-        name: `Centered · ${fc} full + ${remainder > 0 ? "2 partials" : "no cuts"}`,
-        description: remainder > 0 ? `Equal ${decToImperial(partial).display} partials on each side` : "Perfect fit — no partial panels needed",
-        method: "centered",
-        panels,
-        fullPanels: fc,
-        partialWidth: partial,
-        totalPanels: panels.length,
-        sheetsNeeded: panels.length,
+        name: `Centered · ${fc} full + 2 partials`,
+        description: `Equal ${decToImperial(partial).display} partials on each side`,
+        method: "centered", panels, fullPanels: fc, partialWidth: partial,
+        totalPanels: panels.length, sheetsNeeded: panels.length,
         wasteInches: waste,
-        wastePercent: panels.length > 0 ? (waste / (panels.length * panelCoverage)) * 100 : 0,
+        wastePercent: (waste / (panels.length * panelCoverage)) * 100,
       });
     }
+    // else: partial is too narrow or too wide — skip this fc count
   }
+
   // Method 2: Left-flush — full panels from left, one cut on right
-  for (let fc = fullCount; fc >= Math.max(fullCount - 1, 1); fc--) {
+  for (let fc = fullCount; fc >= Math.max(fullCount - maxDropFlush, 1); fc--) {
     const remainder = wallWidth - fc * panelCoverage;
-    if (remainder > 0 && remainder >= minPartialWidth) {
+    // STRICT: remainder must be a valid partial width
+    if (remainder > 0 && remainder >= minPartialWidth && remainder <= panelCoverage) {
       const panels = [];
       for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: panels.length + 1 });
       panels.push({ width: remainder, position: "right-partial", index: panels.length + 1 });
@@ -131,21 +185,18 @@ function generateLayoutVariations(wallWidth, panelCoverage, minPartialWidth = 6)
         id: `left-flush-${fc}`,
         name: `Left flush · ${fc} full + 1 cut right`,
         description: `Full panels from left, ${decToImperial(remainder).display} cut panel on right`,
-        method: "left-flush",
-        panels,
-        fullPanels: fc,
-        partialWidth: remainder,
-        totalPanels: panels.length,
-        sheetsNeeded: panels.length,
+        method: "left-flush", panels, fullPanels: fc, partialWidth: remainder,
+        totalPanels: panels.length, sheetsNeeded: panels.length,
         wasteInches: panelCoverage - remainder,
         wastePercent: ((panelCoverage - remainder) / (panels.length * panelCoverage)) * 100,
       });
     }
   }
-  // Method 3: Right-flush
-  for (let fc = fullCount; fc >= Math.max(fullCount - 1, 1); fc--) {
+
+  // Method 3: Right-flush — cut on left, full panels to right
+  for (let fc = fullCount; fc >= Math.max(fullCount - maxDropFlush, 1); fc--) {
     const remainder = wallWidth - fc * panelCoverage;
-    if (remainder > 0 && remainder >= minPartialWidth) {
+    if (remainder > 0 && remainder >= minPartialWidth && remainder <= panelCoverage) {
       const panels = [];
       panels.push({ width: remainder, position: "left-partial", index: 1 });
       for (let i = 0; i < fc; i++) panels.push({ width: panelCoverage, position: "full", index: panels.length + 1 });
@@ -153,17 +204,14 @@ function generateLayoutVariations(wallWidth, panelCoverage, minPartialWidth = 6)
         id: `right-flush-${fc}`,
         name: `Right flush · 1 cut left + ${fc} full`,
         description: `${decToImperial(remainder).display} cut panel on left, full panels to right`,
-        method: "right-flush",
-        panels,
-        fullPanels: fc,
-        partialWidth: remainder,
-        totalPanels: panels.length,
-        sheetsNeeded: panels.length,
+        method: "right-flush", panels, fullPanels: fc, partialWidth: remainder,
+        totalPanels: panels.length, sheetsNeeded: panels.length,
         wasteInches: panelCoverage - remainder,
         wastePercent: ((panelCoverage - remainder) / (panels.length * panelCoverage)) * 100,
       });
     }
   }
+
   // Sort: centered first, then by least waste
   variations.sort((a, b) => {
     if (a.method === "centered" && b.method !== "centered") return -1;

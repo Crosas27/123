@@ -1,4 +1,4 @@
-const CACHE_NAME = 'metal-panel-v9-stable';
+const CACHE_NAME = 'metal-panel-v11';
 const ASSETS = [
   './',
   './index.html',
